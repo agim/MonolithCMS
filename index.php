@@ -9000,15 +9000,15 @@ HTML;
             $linkHtml = !empty($url) ? "<a href=\"{$url}\" class=\"btn btn-primary btn-sm mt-4\">View Profile</a>" : '';
             
             $cardsHtml .= <<<CARD
-<div class="card bg-base-100 shadow-lg hover:shadow-xl transition-shadow">
+<div class="card bg-base-200/50 shadow-md hover:shadow-lg transition-shadow border border-base-300">
     <div class="card-body items-center text-center">
         <div class="avatar mb-4">
             <div class="w-24 rounded-full ring ring-primary ring-offset-base-100 ring-offset-2">
                 {$avatarHtml}
             </div>
         </div>
-        <h3 class="card-title">{$name}</h3>
-        <div class="badge badge-ghost">{$role}</div>
+        <h3 class="card-title text-base-content">{$name}</h3>
+        <div class="badge badge-outline badge-primary">{$role}</div>
         <p class="text-base-content/70 mt-2">{$bio}</p>
         {$linkHtml}
     </div>
