@@ -3,7 +3,7 @@
 /cache
 /docs
 /site.sqlite
-/*.sqlite.*
+/*.sqlite*
 /db
 /logs
 /tmp
