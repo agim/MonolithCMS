@@ -1329,7 +1329,7 @@ class Templates {
     <meta property="og:description" content="{{meta_description}}">
     {{#if og_image}}<meta property="og:image" content="{{og_image}}">{{/if}}
     <link rel="canonical" href="{{canonical_url}}">
-    <script>
+    <script nonce="{{csp_nonce}}">
         // Auto dark mode detection
         (function() {
             const savedTheme = localStorage.getItem('theme');
@@ -1498,7 +1498,7 @@ HTML,
     <meta property="og:title" content="{{title}}">
     <meta property="og:description" content="{{meta_description}}">
     {{#if og_image}}<meta property="og:image" content="{{og_image}}">{{/if}}
-    <script>
+    <script nonce="{{csp_nonce}}">
         // Auto dark mode detection
         (function() {
             const savedTheme = localStorage.getItem('theme');
@@ -8571,6 +8571,8 @@ class PageController {
         if (!self::$editMode) {
             $cached = Cache::getPage($page['slug']);
             if ($cached !== null) {
+                // Replace nonce placeholder with current request's nonce
+                $cached = str_replace('{{CSP_NONCE_PLACEHOLDER}}', CSP_NONCE, $cached);
                 // Inject admin bar for logged-in users
                 $cached = self::injectAdminBar($cached);
                 Response::html($cached);
@@ -8603,8 +8605,10 @@ class PageController {
         ]));
         
         // Only cache if NOT in edit mode (cache without admin bar)
+        // Store with placeholder nonce so we can inject fresh nonce on serve
         if (!self::$editMode) {
-            Cache::setPage($page['slug'], $html);
+            $cacheHtml = str_replace(CSP_NONCE, '{{CSP_NONCE_PLACEHOLDER}}', $html);
+            Cache::setPage($page['slug'], $cacheHtml);
         }
         
         // Inject admin bar for display

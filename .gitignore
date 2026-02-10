@@ -3,3 +3,11 @@
 /cache
 /docs
 /site.sqlite
+/*.sqlite.*
+/db
+/logs
+/tmp
+/.env
+/.env.local
+/.env.*.local
+/node_modules
