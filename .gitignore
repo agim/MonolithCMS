@@ -1,7 +1,6 @@
 /.github
 /.htaccess
 /cache
-/docs
 /site.sqlite
 /*.sqlite*
 /db
