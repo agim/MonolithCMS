@@ -2,10 +2,21 @@
 /*==============================================================================
  * OneCMS - Single-File AI-Driven Website Builder
  * Version: 1.0.0
- * 
+ *
  * A portable, AI-powered CMS in a single PHP file with SQLite backend.
  * Deploy with just 2 files: index.php + site.sqlite
+ *
+ * Dev server (no separate router file needed):
+ *   php -S 127.0.0.1:8080 index.php
  *=============================================================================*/
+
+// ── PHP built-in server: pass real static files through, route everything else
+if (PHP_SAPI === 'cli-server') {
+    $static = __DIR__ . parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
+    if ($static !== __FILE__ && is_file($static)) {
+        return false; // serve file as-is
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 1: CONFIGURATION & BOOT
@@ -19,8 +30,11 @@ define('ONECMS_CACHE', ONECMS_ROOT . '/cache');
 
 // Environment Detection
 $isProduction = !in_array($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1', ['127.0.0.1', '::1']);
+$isDev        = !$isProduction;
 $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') 
            || ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https';
+
+define('ONECMS_DEV', $isDev);
 
 // Error Handling
 if ($isProduction) {
@@ -29,6 +43,13 @@ if ($isProduction) {
 } else {
     error_reporting(E_ALL);
     ini_set('display_errors', '1');
+}
+
+// Dev mode: disable all caching at the HTTP level
+if (ONECMS_DEV) {
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    header('Pragma: no-cache');
+    header('X-OneCMS-Dev: 1');
 }
 
 // Timezone
@@ -328,7 +349,70 @@ class DB {
             
             // Migration 18: Add last_login to users and meta_json to pages
             18 => "ALTER TABLE users ADD COLUMN last_login TEXT;
-                   ALTER TABLE pages ADD COLUMN meta_json TEXT DEFAULT '{}'"
+                   ALTER TABLE pages ADD COLUMN meta_json TEXT DEFAULT '{}'",
+
+            // Migration 19: Remove dark-mode color variants (dark mode removed)
+            19 => "DELETE FROM theme_styles WHERE key LIKE '%_dark'",
+
+            // Migration 20: Blog categories
+            20 => "CREATE TABLE IF NOT EXISTS blog_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                slug TEXT UNIQUE NOT NULL,
+                description TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )",
+
+            // Migration 21: Blog tags
+            21 => "CREATE TABLE IF NOT EXISTS blog_tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                slug TEXT UNIQUE NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            )",
+
+            // Migration 22: Blog posts
+            22 => "CREATE TABLE IF NOT EXISTS blog_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                slug TEXT UNIQUE NOT NULL,
+                excerpt TEXT,
+                body_html TEXT NOT NULL DEFAULT '',
+                cover_asset_id INTEGER,
+                author_id INTEGER NOT NULL,
+                category_id INTEGER,
+                status TEXT DEFAULT 'draft' CHECK(status IN ('draft','published','archived')),
+                published_at TEXT,
+                meta_description TEXT,
+                og_image_asset_id INTEGER,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (author_id) REFERENCES users(id),
+                FOREIGN KEY (category_id) REFERENCES blog_categories(id) ON DELETE SET NULL,
+                FOREIGN KEY (cover_asset_id) REFERENCES assets(id) ON DELETE SET NULL
+            )",
+
+            // Migration 23: Blog post-tag many-to-many
+            23 => "CREATE TABLE IF NOT EXISTS blog_post_tags (
+                post_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                PRIMARY KEY (post_id, tag_id),
+                FOREIGN KEY (post_id) REFERENCES blog_posts(id) ON DELETE CASCADE,
+                FOREIGN KEY (tag_id) REFERENCES blog_tags(id) ON DELETE CASCADE
+            )",
+
+            // Migration 24: Blog indexes
+            24 => "CREATE INDEX IF NOT EXISTS idx_blog_posts_slug ON blog_posts(slug);
+                   CREATE INDEX IF NOT EXISTS idx_blog_posts_status ON blog_posts(status);
+                   CREATE INDEX IF NOT EXISTS idx_blog_posts_category ON blog_posts(category_id);
+                   CREATE INDEX IF NOT EXISTS idx_blog_posts_author ON blog_posts(author_id)",
+
+            // Migration 25: Blog settings defaults
+            25 => "INSERT OR IGNORE INTO settings (key, value) VALUES
+                   ('blog_enabled', '0'),
+                   ('blog_posts_per_page', '10'),
+                   ('blog_title', 'Blog'),
+                   ('blog_description', '')"
         ];
         
         foreach ($migrations as $version => $sql) {
@@ -848,6 +932,8 @@ class Request {
 
 class Response {
     public static function json(array $data, int $code = 200): void {
+        // Discard any PHP notices/warnings that were written before this call
+        if (ob_get_level()) { ob_end_clean(); }
         http_response_code($code);
         header('Content-Type: application/json');
         echo json_encode($data);
@@ -1239,8 +1325,8 @@ class Template {
         // Check partial cache first
         $cacheFile = ONECMS_CACHE . '/partials/' . $name . '.html';
         
-        // Use cached version if fresh (1 hour TTL)
-        if (file_exists($cacheFile) && filemtime($cacheFile) > time() - 3600) {
+        // Use cached version if fresh (1 hour TTL) — skip in dev mode
+        if (!ONECMS_DEV && file_exists($cacheFile) && filemtime($cacheFile) > time() - 3600) {
             return file_get_contents($cacheFile);
         }
         
@@ -1252,8 +1338,10 @@ class Template {
             default => self::getTemplate('_' . $name)
         };
         
-        // Cache it
-        file_put_contents($cacheFile, $html);
+        // Cache it (skip write in dev mode)
+        if (!ONECMS_DEV) {
+            file_put_contents($cacheFile, $html);
+        }
         return $html;
     }
     
@@ -1319,7 +1407,7 @@ class Templates {
             // ─── LAYOUT ──────────────────────────────────────────────────
             'layout' => <<<'HTML'
 <!DOCTYPE html>
-<html lang="en" data-theme="{{ui_theme}}" data-light-theme="{{ui_theme}}">
+<html lang="en" data-theme="{{ui_theme}}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1330,26 +1418,7 @@ class Templates {
     {{#if og_image}}<meta property="og:image" content="{{og_image}}">{{/if}}
     <link rel="canonical" href="{{canonical_url}}">
     <script nonce="{{csp_nonce}}">
-        // Auto dark mode detection
-        (function() {
-            const savedTheme = localStorage.getItem('theme');
-            const lightTheme = document.documentElement.dataset.lightTheme || 'emerald';
-            const darkThemes = {
-                'light': 'dark', 'cupcake': 'dark', 'bumblebee': 'dark', 'emerald': 'forest',
-                'corporate': 'business', 'garden': 'forest', 'lofi': 'black', 'pastel': 'night',
-                'fantasy': 'dracula', 'wireframe': 'black', 'cmyk': 'dark', 'autumn': 'halloween',
-                'acid': 'synthwave', 'lemonade': 'night', 'winter': 'night'
-            };
-            const darkTheme = darkThemes[lightTheme] || 'dark';
-            
-            if (savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-                document.documentElement.setAttribute('data-theme', darkTheme);
-                document.documentElement.classList.add('dark');
-            } else {
-                document.documentElement.setAttribute('data-theme', lightTheme);
-                document.documentElement.classList.remove('dark');
-            }
-        })();
+        (function(){var t=localStorage.getItem('onecms-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();
     </script>
     <link href="/cdn/daisyui.min.css" rel="stylesheet" type="text/css" />
     <script src="/cdn/tailwind.min.js"></script>
@@ -1437,13 +1506,6 @@ HTML,
         </ul>
     </div>
     <div class="navbar-end gap-2">
-        <label class="swap swap-rotate btn btn-ghost btn-circle text-base-content" title="Toggle dark mode">
-            <input type="checkbox" id="theme-toggle" class="theme-controller" />
-            <!-- sun icon -->
-            <svg class="swap-off fill-current w-6 h-6" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5.64,17l-.71.71a1,1,0,0,0,0,1.41,1,1,0,0,0,1.41,0l.71-.71A1,1,0,0,0,5.64,17ZM5,12a1,1,0,0,0-1-1H3a1,1,0,0,0,0,2H4A1,1,0,0,0,5,12Zm7-7a1,1,0,0,0,1-1V3a1,1,0,0,0-2,0V4A1,1,0,0,0,12,5ZM5.64,7.05a1,1,0,0,0,.7.29,1,1,0,0,0,.71-.29,1,1,0,0,0,0-1.41l-.71-.71A1,1,0,0,0,4.93,6.34Zm12,.29a1,1,0,0,0,.7-.29l.71-.71a1,1,0,1,0-1.41-1.41L17,5.64a1,1,0,0,0,0,1.41A1,1,0,0,0,17.66,7.34ZM21,11H20a1,1,0,0,0,0,2h1a1,1,0,0,0,0-2Zm-9,8a1,1,0,0,0-1,1v1a1,1,0,0,0,2,0V20A1,1,0,0,0,12,19ZM18.36,17A1,1,0,0,0,17,18.36l.71.71a1,1,0,0,0,1.41,0,1,1,0,0,0,0-1.41ZM12,6.5A5.5,5.5,0,1,0,17.5,12,5.51,5.51,0,0,0,12,6.5Zm0,9A3.5,3.5,0,1,1,15.5,12,3.5,3.5,0,0,1,12,15.5Z"/></svg>
-            <!-- moon icon -->
-            <svg class="swap-on fill-current w-6 h-6" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21.64,13a1,1,0,0,0-1.05-.14,8.05,8.05,0,0,1-3.37.73A8.15,8.15,0,0,1,9.08,5.49a8.59,8.59,0,0,1,.25-2A1,1,0,0,0,8,2.36,10.14,10.14,0,1,0,22,14.05,1,1,0,0,0,21.64,13Z"/></svg>
-        </label>
         <a href="/contact" class="btn btn-primary btn-sm">Contact</a>
     </div>
 </div>
@@ -1499,26 +1561,8 @@ HTML,
     <meta property="og:description" content="{{meta_description}}">
     {{#if og_image}}<meta property="og:image" content="{{og_image}}">{{/if}}
     <script nonce="{{csp_nonce}}">
-        // Auto dark mode detection
-        (function() {
-            const savedTheme = localStorage.getItem('theme');
-            const lightTheme = document.documentElement.dataset.lightTheme || 'emerald';
-            const darkThemes = {
-                'light': 'dark', 'cupcake': 'dark', 'bumblebee': 'dark', 'emerald': 'forest',
-                'corporate': 'business', 'garden': 'forest', 'lofi': 'black', 'pastel': 'night',
-                'fantasy': 'dracula', 'wireframe': 'black', 'cmyk': 'dark', 'autumn': 'halloween',
-                'acid': 'synthwave', 'lemonade': 'night', 'winter': 'night'
-            };
-            const darkTheme = darkThemes[lightTheme] || 'dark';
-            
-            if (savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-                document.documentElement.setAttribute('data-theme', darkTheme);
-                document.documentElement.classList.add('dark');
-            } else {
-                document.documentElement.setAttribute('data-theme', lightTheme);
-                document.documentElement.classList.remove('dark');
-            }
-        })();
+        // Restore last saved theme to prevent FOUT
+        (function(){var t=localStorage.getItem('onecms-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();
     </script>
     <link href="/cdn/daisyui.min.css" rel="stylesheet" type="text/css" />
     <script src="/cdn/tailwind.min.js"></script>
@@ -1543,6 +1587,7 @@ HTML,
         .reveal { opacity: 0; transform: translateY(30px); transition: all 0.6s ease; }
         .reveal.visible { opacity: 1; transform: translateY(0); }
     </style>
+    {{{page_custom_css}}}
 </head>
 <body class="min-h-screen bg-base-100 text-base-content">
     <!--ONECMS_ADMIN_BAR-->
@@ -1563,31 +1608,7 @@ HTML,
     {{#if edit_mode}}</div>{{/if}}
     {{#if edit_mode}}<script src="/js/editor" nonce="{{csp_nonce}}"></script>{{/if}}
     <script src="/js/reveal"></script>
-    <script nonce="{{csp_nonce}}">
-        document.addEventListener('DOMContentLoaded', () => {
-            const toggle = document.getElementById('theme-toggle');
-            if (toggle) {
-                if (document.documentElement.classList.contains('dark')) {
-                    toggle.checked = true;
-                }
-                toggle.addEventListener('change', (e) => {
-                    const lightTheme = document.documentElement.dataset.lightTheme || 'emerald';
-                    const darkThemes = {'light':'dark','cupcake':'dark','bumblebee':'dark','emerald':'forest','corporate':'business','garden':'forest','lofi':'black','pastel':'night','fantasy':'dracula','wireframe':'black','cmyk':'dark','autumn':'halloween','acid':'synthwave','lemonade':'night','winter':'night'};
-                    const darkTheme = darkThemes[lightTheme] || 'dark';
-                    
-                    if (e.target.checked) {
-                        document.documentElement.setAttribute('data-theme', darkTheme);
-                        document.documentElement.classList.add('dark');
-                        localStorage.setItem('theme', 'dark');
-                    } else {
-                        document.documentElement.setAttribute('data-theme', lightTheme);
-                        document.documentElement.classList.remove('dark');
-                        localStorage.setItem('theme', 'light');
-                    }
-                });
-            }
-        });
-    </script>
+    <script src="/js/theme"></script>
 </body>
 </html>
 HTML,
@@ -1629,8 +1650,111 @@ HTML,
             },
         }
     </script>
+    <style>
+/* ── OneCMS Admin Design System ────────────────────────────── */
+:root{
+  --p:#135bec;--p-h:#1251d4;--p-r:rgba(19,91,236,.16);
+  --bd:#e2e8f0;--bd-i:#cbd5e1;
+  --tx:#0f172a;--mx:#64748b;--px:#94a3b8;
+  --sf:#fff;--bg:#f6f7fb;
+  --r:8px;--r-sm:6px;--r-lg:12px;
+  --sh:0 1px 3px rgba(0,0,0,.07),0 1px 2px rgba(0,0,0,.04);
+}
+/* ── Form Controls ── */
+.cms-input,.cms-select,.cms-textarea{
+  display:block;width:100%;padding:.5625rem .875rem;
+  border:1.5px solid var(--bd-i);border-radius:var(--r);
+  background:var(--sf);color:var(--tx);
+  font-size:.875rem;line-height:1.5;font-family:inherit;
+  transition:border-color .15s,box-shadow .15s;outline:none;
+}
+.cms-input::placeholder,.cms-textarea::placeholder{color:var(--px);}
+.cms-input:focus,.cms-select:focus,.cms-textarea:focus{
+  border-color:var(--p);box-shadow:0 0 0 3.5px var(--p-r);
+}
+.cms-input:disabled,.cms-select:disabled,.cms-textarea:disabled{
+  background:#f8fafc;color:var(--mx);cursor:not-allowed;
+}
+.cms-textarea{resize:vertical;min-height:5rem;}
+.cms-select{cursor:pointer;appearance:none;-webkit-appearance:none;padding-right:2.5rem;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke-width='2' stroke='%2364748b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' d='M19 9l-7 7-7-7'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right .75rem center;background-size:1rem;}
+/* ── Labels & Hints ── */
+.cms-label{display:block;font-size:.8125rem;font-weight:600;color:#374151;margin-bottom:.375rem;}
+.cms-label-sm{display:block;font-size:.75rem;font-weight:500;color:var(--mx);margin-bottom:.25rem;}
+.cms-hint{font-size:.75rem;color:var(--px);margin-top:.375rem;line-height:1.4;}
+/* ── Card ── */
+.cms-card{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r-lg);padding:1.5rem;box-shadow:var(--sh);margin-bottom:1.25rem;}
+.cms-card:last-child{margin-bottom:0;}
+.cms-card-header{display:flex;align-items:center;gap:.5rem;font-size:1rem;font-weight:700;color:var(--tx);margin-bottom:1.125rem;padding-bottom:.875rem;border-bottom:1px solid #f1f5f9;}
+.cms-card-header .material-symbols-outlined{font-size:1.25rem;color:var(--p);}
+.cms-card-title{font-size:.9375rem;font-weight:600;color:#1e293b;margin-bottom:.875rem;}
+/* ── Buttons ── */
+.cms-btn{display:inline-flex;align-items:center;justify-content:center;gap:.4375rem;padding:.5625rem 1.125rem;background:var(--p);color:#fff;font-size:.875rem;font-weight:600;line-height:1;border:none;border-radius:var(--r);cursor:pointer;text-decoration:none;transition:background-color .15s;white-space:nowrap;}
+.cms-btn:hover{background:var(--p-h);}
+.cms-btn:disabled{opacity:.55;cursor:not-allowed;}
+.cms-btn-ghost{display:inline-flex;align-items:center;justify-content:center;gap:.4375rem;padding:.5625rem 1.125rem;background:#f1f5f9;color:#475569;font-size:.875rem;font-weight:600;line-height:1;border:1px solid var(--bd);border-radius:var(--r);cursor:pointer;text-decoration:none;transition:background-color .15s;white-space:nowrap;}
+.cms-btn-ghost:hover{background:#e2e8f0;color:var(--tx);}
+.cms-btn-danger{display:inline-flex;align-items:center;justify-content:center;gap:.375rem;padding:.4375rem .875rem;background:#fef2f2;color:#dc2626;font-size:.8125rem;font-weight:600;line-height:1;border:1px solid #fee2e2;border-radius:var(--r-sm);cursor:pointer;text-decoration:none;transition:background-color .15s;white-space:nowrap;}
+.cms-btn-danger:hover{background:#fee2e2;}
+.cms-btn-action{display:inline-flex;align-items:center;justify-content:center;gap:.375rem;padding:.4375rem .875rem;background:#f8fafc;color:#475569;font-size:.8125rem;font-weight:500;line-height:1;border:1px solid var(--bd);border-radius:var(--r-sm);cursor:pointer;text-decoration:none;transition:background-color .15s;white-space:nowrap;}
+.cms-btn-action:hover{background:#f1f5f9;color:var(--tx);}
+.cms-btn-sm{padding:.375rem .75rem;font-size:.8125rem;}
+.cms-btn-icon{padding:.4375rem;}
+/* ── Alerts ── */
+.cms-alert{display:flex;align-items:flex-start;gap:.75rem;padding:.875rem 1rem;border-radius:var(--r);border:1px solid;margin-bottom:1.25rem;font-size:.875rem;line-height:1.5;}
+.cms-alert .material-symbols-outlined{font-size:1.25rem;flex-shrink:0;margin-top:.05rem;}
+.cms-alert-success{background:#f0fdf4;border-color:#bbf7d0;color:#166534;}
+.cms-alert-success .material-symbols-outlined{color:#16a34a;}
+.cms-alert-error{background:#fef2f2;border-color:#fecaca;color:#991b1b;}
+.cms-alert-error .material-symbols-outlined{color:#dc2626;}
+.cms-alert-warning{background:#fffbeb;border-color:#fde68a;color:#92400e;}
+.cms-alert-warning .material-symbols-outlined{color:#d97706;}
+.cms-alert-info{background:#eff6ff;border-color:#bfdbfe;color:#1e40af;}
+.cms-alert-info .material-symbols-outlined{color:#3b82f6;}
+/* ── Badges ── */
+.cms-badge{display:inline-flex;align-items:center;gap:.3125rem;padding:.25rem .625rem;border-radius:9999px;font-size:.6875rem;font-weight:700;letter-spacing:.02em;border:1px solid transparent;white-space:nowrap;}
+.cms-badge::before{content:'';width:.3125rem;height:.3125rem;border-radius:9999px;display:inline-block;flex-shrink:0;}
+.cms-badge-published{background:#f0fdf4;border-color:#86efac;color:#15803d;}
+.cms-badge-published::before{background:#22c55e;}
+.cms-badge-draft{background:#f8fafc;border-color:#cbd5e1;color:#64748b;}
+.cms-badge-draft::before{background:#94a3b8;}
+.cms-badge-archived{background:#fafaf9;border-color:#e7e5e4;color:#78716c;}
+.cms-badge-archived::before{background:#a8a29e;}
+.cms-badge-admin{background:#fff1f2;border-color:#fecdd3;color:#be123c;}
+.cms-badge-admin::before{background:#e11d48;}
+.cms-badge-editor{background:#eff6ff;border-color:#bfdbfe;color:#1d4ed8;}
+.cms-badge-editor::before{background:#3b82f6;}
+.cms-badge-viewer{background:#f8fafc;border-color:#cbd5e1;color:#64748b;}
+.cms-badge-viewer::before{background:#94a3b8;}
+/* ── Table ── */
+.cms-table-wrap{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r-lg);overflow:hidden;box-shadow:var(--sh);}
+.cms-table-wrap table{width:100%;text-align:left;border-collapse:collapse;}
+.cms-table-wrap thead{background:#f8fafc;}
+.cms-table-wrap th{padding:.75rem 1.25rem;font-size:.6875rem;font-weight:700;color:var(--mx);text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--bd);}
+.cms-table-wrap td{padding:.9375rem 1.25rem;font-size:.875rem;color:#334155;border-bottom:1px solid #f1f5f9;}
+.cms-table-wrap tbody tr:last-child td{border-bottom:none;}
+.cms-table-wrap tbody tr:hover{background:#f8fafc;}
+/* ── Page Header ── */
+.cms-page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.75rem;gap:1rem;flex-wrap:wrap;}
+.cms-page-title{font-size:1.375rem;font-weight:800;color:var(--tx);letter-spacing:-.01em;line-height:1.2;}
+.cms-page-subtitle{font-size:.875rem;color:var(--mx);margin-top:.25rem;}
+.cms-back{display:inline-flex;align-items:center;color:var(--mx);text-decoration:none;transition:color .15s;padding:.25rem;border-radius:var(--r-sm);}
+.cms-back:hover{color:var(--p);background:#f1f5f9;}
+/* ── Filter Tabs ── */
+.cms-filter-tabs{display:flex;gap:.375rem;margin-bottom:1.25rem;flex-wrap:wrap;}
+.cms-filter-tab{padding:.375rem .875rem;border-radius:var(--r-sm);font-size:.8125rem;font-weight:500;color:var(--mx);background:#fff;border:1px solid var(--bd);text-decoration:none;transition:all .15s;white-space:nowrap;}
+.cms-filter-tab:hover{background:#f8fafc;color:var(--tx);}
+.cms-filter-tab.active{background:var(--p);color:#fff;border-color:var(--p);}
+/* ── Empty State ── */
+.cms-empty{text-align:center;padding:3rem 1.5rem;}
+.cms-empty-icon{width:3.5rem;height:3.5rem;border-radius:9999px;background:#f1f5f9;display:flex;align-items:center;justify-content:center;margin:0 auto .875rem;}
+.cms-empty-icon .material-symbols-outlined{font-size:1.75rem;color:var(--px);}
+.cms-empty h4{font-size:1rem;font-weight:700;color:var(--tx);margin-bottom:.375rem;}
+.cms-empty p{font-size:.875rem;color:var(--mx);margin-bottom:1.25rem;}
+    </style>
 </head>
-<body class="bg-background-light dark:bg-background-dark font-display text-slate-900 dark:text-white transition-colors duration-200">
+<body class="bg-background-light font-display text-slate-900 transition-colors duration-200">
 <div class="flex h-screen overflow-hidden">
     <!-- Sidebar -->
     <aside class="w-64 bg-white dark:bg-[#1e293b] border-r border-slate-200 dark:border-slate-700 flex flex-col transition-colors duration-200">
@@ -1664,6 +1788,10 @@ HTML,
                 <span class="material-symbols-outlined text-[22px]">palette</span>
                 <span class="text-sm">Theme</span>
             </a>
+            <a class="flex items-center gap-3 px-3 py-2.5 rounded-lg {{#if is_theme_kit}}bg-primary/10 text-primary font-medium{{else}}text-slate-600 hover:bg-slate-50{{/if}} transition-colors" href="/admin/theme/kit">
+                <span class="material-symbols-outlined text-[22px]">style</span>
+                <span class="text-sm">Theme Kit</span>
+            </a>
             <a class="flex items-center gap-3 px-3 py-2.5 rounded-lg {{#if is_users}}bg-primary/10 text-primary font-medium{{else}}text-slate-600 hover:bg-slate-50{{/if}} transition-colors" href="/admin/users">
                 <span class="material-symbols-outlined text-[22px]">group</span>
                 <span class="text-sm">Users</span>
@@ -1675,17 +1803,29 @@ HTML,
                 <span class="material-symbols-outlined text-[22px]">auto_awesome</span>
                 <span class="text-sm">AI Generate</span>
             </a>
+            <a class="flex items-center gap-3 px-3 py-2.5 rounded-lg {{#if is_ai_chat}}bg-primary/10 text-primary font-medium{{else}}text-slate-600 hover:bg-slate-50{{/if}} transition-colors" href="/admin/ai/chat">
+                <span class="material-symbols-outlined text-[22px]">forum</span>
+                <span class="text-sm">AI Chat</span>
+            </a>
             <a class="flex items-center gap-3 px-3 py-2.5 rounded-lg {{#if is_approvals}}bg-primary/10 text-primary font-medium{{else}}text-slate-600 hover:bg-slate-50{{/if}} transition-colors" href="/admin/approvals">
                 <span class="material-symbols-outlined text-[22px]">pending_actions</span>
                 <span class="text-sm">Approvals</span>
             </a>
+            {{#if blog_enabled}}
+            <div class="pt-4 pb-2">
+                <p class="px-3 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Blog</p>
+            </div>
+            <a class="flex items-center gap-3 px-3 py-2.5 rounded-lg {{#if is_blog}}bg-primary/10 text-primary font-medium{{else}}text-slate-600 hover:bg-slate-50{{/if}} transition-colors" href="/admin/blog/posts">
+                <span class="material-symbols-outlined text-[22px]">article</span>
+                <span class="text-sm">Posts</span>
+            </a>
+            <a class="flex items-center gap-3 px-3 py-2.5 rounded-lg {{#if is_blog_cats}}bg-primary/10 text-primary font-medium{{else}}text-slate-600 hover:bg-slate-50{{/if}} transition-colors" href="/admin/blog/categories">
+                <span class="material-symbols-outlined text-[22px]">folder</span>
+                <span class="text-sm">Categories</span>
+            </a>
+            {{/if}}
         </nav>
-        <div class="p-4 border-t border-slate-200 dark:border-slate-700">
-            <button id="theme-toggle-btn" type="button" class="w-full flex items-center gap-3 px-3 py-2 mb-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
-                <span class="material-symbols-outlined text-[22px] dark:hidden">dark_mode</span>
-                <span class="material-symbols-outlined text-[22px] hidden dark:block">light_mode</span>
-                <span class="text-sm font-medium">Toggle Theme</span>
-            </button>
+        <div class="p-4 border-t border-slate-200">
             <div class="flex items-center gap-3 p-2">
                 <div class="size-8 rounded-full bg-primary/20 flex items-center justify-center">
                     <span class="material-symbols-outlined text-primary text-[18px]">person</span>
@@ -1730,8 +1870,8 @@ HTML,
             </div>
         </header>
         <div class="p-8">
-            {{#if flash_error}}<div class="mb-6 p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg flex items-center gap-3"><span class="material-symbols-outlined">error</span>{{flash_error}}</div>{{/if}}
-            {{#if flash_success}}<div class="mb-6 p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg flex items-center gap-3"><span class="material-symbols-outlined">check_circle</span>{{flash_success}}</div>{{/if}}
+            {{#if flash_error}}<div class="cms-alert cms-alert-error mb-6"><span class="material-symbols-outlined">error</span>{{flash_error}}</div>{{/if}}
+            {{#if flash_success}}<div class="cms-alert cms-alert-success mb-6"><span class="material-symbols-outlined">check_circle</span>{{flash_success}}</div>{{/if}}
             {{{content}}}
         </div>
     </main>
@@ -1876,31 +2016,6 @@ window.copyUrl = function(url) {
     });
 };
 
-// Theme Toggle Logic
-const themeBtn = document.getElementById('theme-toggle-btn');
-if (themeBtn) {
-    themeBtn.addEventListener('click', () => {
-        // if set via local storage previously
-        if (localStorage.getItem('color-theme')) {
-            if (localStorage.getItem('color-theme') === 'light') {
-                document.documentElement.classList.add('dark');
-                localStorage.setItem('color-theme', 'dark');
-            } else {
-                document.documentElement.classList.remove('dark');
-                localStorage.setItem('color-theme', 'light');
-            }
-        // if NOT set via local storage previously
-        } else {
-            if (document.documentElement.classList.contains('dark')) {
-                document.documentElement.classList.remove('dark');
-                localStorage.setItem('color-theme', 'light');
-            } else {
-                document.documentElement.classList.add('dark');
-                localStorage.setItem('color-theme', 'dark');
-            }
-        }
-    });
-}
 </script>
 </body>
 </html>
@@ -1914,11 +2029,6 @@ HTML,
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login | OneCMS</title>
-    <script>
-        if (localStorage.getItem('color-theme') === 'dark' || (!('color-theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-            document.documentElement.classList.add('dark');
-        }
-    </script>
     <script src="/cdn/tailwind-forms.min.js"></script>
     <link href="/cdn/inter-font.css" rel="stylesheet">
     <link href="/cdn/material-icons.css" rel="stylesheet">
@@ -1932,39 +2042,51 @@ HTML,
             },
         }
     </script>
+    <style>
+:root{--p:#135bec;--p-h:#1251d4;--p-r:rgba(19,91,236,.16);--bd:#e2e8f0;--bd-i:#cbd5e1;--tx:#0f172a;--mx:#64748b;--px:#94a3b8;--sf:#fff;--r:8px;--r-sm:6px;--r-lg:12px;}
+.cms-input,.cms-select,.cms-textarea{display:block;width:100%;padding:.5625rem .875rem;border:1.5px solid var(--bd-i);border-radius:var(--r);background:var(--sf);color:var(--tx);font-size:.875rem;line-height:1.5;font-family:inherit;transition:border-color .15s,box-shadow .15s;outline:none;}
+.cms-input::placeholder{color:var(--px);}
+.cms-input:focus,.cms-select:focus,.cms-textarea:focus{border-color:var(--p);box-shadow:0 0 0 3.5px var(--p-r);}
+.cms-btn{display:inline-flex;align-items:center;justify-content:center;gap:.4375rem;padding:.5625rem 1.125rem;background:var(--p);color:#fff;font-size:.875rem;font-weight:600;line-height:1;border:none;border-radius:var(--r);cursor:pointer;text-decoration:none;transition:background-color .15s;white-space:nowrap;}
+.cms-btn:hover{background:var(--p-h);}
+.cms-alert{display:flex;align-items:flex-start;gap:.75rem;padding:.875rem 1rem;border-radius:var(--r);border:1px solid;font-size:.875rem;line-height:1.5;}
+.cms-alert .material-symbols-outlined{font-size:1.25rem;flex-shrink:0;margin-top:.05rem;}
+.cms-alert-success{background:#f0fdf4;border-color:#bbf7d0;color:#166534;}
+.cms-alert-error{background:#fef2f2;border-color:#fecaca;color:#991b1b;}
+    </style>
 </head>
-<body class="bg-slate-100 dark:bg-slate-950 font-display min-h-screen flex items-center justify-center p-4 transition-colors">
+<body class="bg-slate-50 font-display min-h-screen flex items-center justify-center p-4">
     <div class="w-full max-w-md">
-        <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-xl p-8 transition-colors">
+        <div class="bg-white rounded-2xl shadow-xl p-8">
             <div class="flex justify-center mb-6">
                 <div class="bg-primary size-14 rounded-xl flex items-center justify-center text-white">
                     <span class="material-symbols-outlined text-3xl">mms</span>
                 </div>
             </div>
-            <h1 class="text-2xl font-bold text-slate-900 dark:text-white text-center mb-2">Welcome back</h1>
-            <p class="text-slate-500 dark:text-slate-400 text-center mb-8">Sign in to your OneCMS admin account</p>
+            <h1 class="text-2xl font-bold text-slate-900 text-center mb-2">Welcome back</h1>
+            <p class="text-slate-500 text-center mb-8">Sign in to your OneCMS admin account</p>
             
-            {{#if flash}}<div class="mb-6 p-4 {{#if flash.is_error}}bg-red-50 border border-red-200 text-red-700{{else}}bg-emerald-50 border border-emerald-200 text-emerald-700{{/if}} rounded-lg text-sm flex items-center gap-2">
-                <span class="material-symbols-outlined text-lg">{{#if flash.is_error}}error{{else}}check_circle{{/if}}</span>
+            {{#if flash}}<div class="cms-alert {{#if flash.is_error}}cms-alert-error{{else}}cms-alert-success{{/if}} mb-6">
+                <span class="material-symbols-outlined">{{#if flash.is_error}}error{{else}}check_circle{{/if}}</span>
                 {{flash.message}}
             </div>{{/if}}
             
             <form method="post" action="/admin/login" class="space-y-5">
                 {{{csrf_field}}}
                 <div>
-                    <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Email</label>
+                    <label class="cms-label">Email</label>
                     <input type="email" name="email" required autofocus 
-                        class="w-full px-4 py-3 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white rounded-lg focus:ring-2 focus:ring-primary focus:border-primary transition-colors placeholder-slate-400"
+                        class="cms-input"
                         placeholder="you@example.com">
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Password</label>
+                    <label class="cms-label">Password</label>
                     <input type="password" name="password" required 
-                        class="w-full px-4 py-3 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white rounded-lg focus:ring-2 focus:ring-primary focus:border-primary transition-colors placeholder-slate-400"
+                        class="cms-input"
                         placeholder="••••••••••••">
                 </div>
                 <button type="submit" 
-                    class="w-full bg-primary text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary/90 transition-colors flex items-center justify-center gap-2">
+                    class="cms-btn w-full py-3">
                     <span class="material-symbols-outlined text-xl">login</span>
                     Sign In
                 </button>
@@ -2055,7 +2177,7 @@ HTML,
     </div>
     <div class="bg-white p-6 rounded-xl border border-slate-200">
         <div class="flex items-center justify-between mb-4">
-            <div class="p-2 bg-violet-50 text-violet-600 rounded-lg">
+            <div class="p-2 bg-blue-50 text-blue-600 rounded-lg">
                 <span class="material-symbols-outlined">image</span>
             </div>
         </div>
@@ -2134,9 +2256,9 @@ HTML,
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap">
                         {{#if is_published}}
-                        <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-600 border border-emerald-100">Published</span>
+                        <span class="cms-badge cms-badge-published">Published</span>
                         {{else}}
-                        <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200">Draft</span>
+                        <span class="cms-badge cms-badge-draft">Draft</span>
                         {{/if}}
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-slate-600">{{updated_at}}</td>
@@ -2333,33 +2455,33 @@ HTML,
             // ─── ADMIN: PAGES LIST ───────────────────────────────────────
             'admin/pages' => <<<'HTML'
 <!-- Page Header -->
-<div class="mb-8 flex items-center justify-between">
+<div class="cms-page-header">
     <div>
-        <h1 class="text-2xl font-bold text-gray-900">Pages</h1>
-        <p class="text-gray-600 mt-1">Manage your website pages and content.</p>
+        <h1 class="cms-page-title">Pages</h1>
+        <p class="cms-page-subtitle">Manage your website pages and content.</p>
     </div>
-    <a href="/admin/pages/new" class="inline-flex items-center gap-2 px-4 py-2.5 bg-[#135bec] text-white font-medium rounded-lg hover:bg-[#0f4fd1] transition-colors">
+    <a href="/admin/pages/new" class="cms-btn">
         <span class="material-symbols-outlined text-xl">add</span>
         New Page
     </a>
 </div>
 
 {{#if flash_error}}
-<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-red-600">error</span>
-    <span class="text-red-800">{{flash_error}}</span>
+<div class="cms-alert cms-alert-error">
+    <span class="material-symbols-outlined">error</span>
+    <span>{{flash_error}}</span>
 </div>
 {{/if}}
 
 {{#if flash_success}}
-<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-green-600">check_circle</span>
-    <span class="text-green-800">{{flash_success}}</span>
+<div class="cms-alert cms-alert-success">
+    <span class="material-symbols-outlined">check_circle</span>
+    <span>{{flash_success}}</span>
 </div>
 {{/if}}
 
 {{#if pages}}
-<div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+<div class="cms-table-wrap">
     <div class="overflow-x-auto">
         <table class="w-full">
             <thead>
@@ -2387,31 +2509,25 @@ HTML,
                     </td>
                     <td class="px-6 py-4">
                         {{#if is_published}}
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium bg-green-100 text-green-800 rounded-full">
-                            <span class="w-1.5 h-1.5 bg-green-500 rounded-full"></span>
-                            Published
-                        </span>
+                        <span class="cms-badge cms-badge-published">Published</span>
                         {{else}}
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium bg-amber-100 text-amber-800 rounded-full">
-                            <span class="w-1.5 h-1.5 bg-amber-500 rounded-full"></span>
-                            Draft
-                        </span>
+                        <span class="cms-badge cms-badge-draft">Draft</span>
                         {{/if}}
                     </td>
                     <td class="px-6 py-4 text-sm text-gray-500">{{updated_at}}</td>
                     <td class="px-6 py-4">
                         <div class="flex items-center justify-end gap-2">
-                            <a href="/admin/pages/{{id}}" class="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">
+                            <a href="/admin/pages/{{id}}" class="cms-btn-action">
                                 <span class="material-symbols-outlined text-lg">edit</span>
                                 Edit
                             </a>
-                            <a href="/{{slug}}" target="_blank" class="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">
+                            <a href="/{{slug}}" target="_blank" class="cms-btn-action">
                                 <span class="material-symbols-outlined text-lg">open_in_new</span>
                                 View
                             </a>
                             <form method="post" action="/admin/pages/{{id}}/delete" class="inline" data-confirm="Delete this page?">
                                 {{{csrf_field}}}
-                                <button type="submit" class="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 transition-colors">
+                                <button type="submit" class="cms-btn-danger">
                                     <span class="material-symbols-outlined text-lg">delete</span>
                                     Delete
                                 </button>
@@ -2432,11 +2548,11 @@ HTML,
     <h3 class="text-lg font-semibold text-gray-900 mb-2">No pages yet</h3>
     <p class="text-gray-600 mb-6">Create your first page or use AI to generate a complete website.</p>
     <div class="flex items-center justify-center gap-3">
-        <a href="/admin/pages/new" class="inline-flex items-center gap-2 px-4 py-2.5 bg-[#135bec] text-white font-medium rounded-lg hover:bg-[#0f4fd1] transition-colors">
+        <a href="/admin/pages/new" class="cms-btn">
             <span class="material-symbols-outlined text-xl">add</span>
             Create Page
         </a>
-        <a href="/admin/ai" class="inline-flex items-center gap-2 px-4 py-2.5 bg-gray-100 text-gray-700 font-medium rounded-lg hover:bg-gray-200 transition-colors">
+        <a href="/admin/ai" class="cms-btn-ghost">
             <span class="material-symbols-outlined text-xl">auto_awesome</span>
             AI Generate
         </a>
@@ -2450,7 +2566,7 @@ HTML,
 <!-- Page Header -->
 <div class="mb-6 flex items-center justify-between">
     <div class="flex items-center gap-3">
-        <a href="/admin/pages" class="text-gray-500 hover:text-gray-700">
+        <a href="/admin/pages" class="cms-back">
             <span class="material-symbols-outlined">arrow_back</span>
         </a>
         <div>
@@ -2459,7 +2575,7 @@ HTML,
         </div>
     </div>
     {{#if is_new}}
-    <button type="button" id="ai-generate-btn" class="inline-flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-medium rounded-lg hover:from-purple-700 hover:to-indigo-700 transition-all shadow-md">
+    <button type="button" id="ai-generate-btn" class="cms-btn shadow-md">
         <span class="material-symbols-outlined">auto_awesome</span>
         AI Generate
     </button>
@@ -2467,16 +2583,16 @@ HTML,
 </div>
 
 {{#if flash_error}}
-<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-red-600">error</span>
-    <span class="text-red-800">{{flash_error}}</span>
+<div class="cms-alert cms-alert-error">
+    <span class="material-symbols-outlined">error</span>
+    <span>{{flash_error}}</span>
 </div>
 {{/if}}
 
 {{#if flash_success}}
-<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-green-600">check_circle</span>
-    <span class="text-green-800">{{flash_success}}</span>
+<div class="cms-alert cms-alert-success">
+    <span class="material-symbols-outlined">check_circle</span>
+    <span>{{flash_success}}</span>
 </div>
 {{/if}}
 
@@ -2487,15 +2603,15 @@ HTML,
         <!-- Main Content Column -->
         <div class="lg:col-span-2 space-y-6">
             <!-- Page Title -->
-            <div class="bg-white rounded-xl border border-gray-200 p-6">
-                <label class="block text-sm font-medium text-gray-700 mb-2">Page Title *</label>
+            <div class="cms-card">
+                <label class="cms-label">Page Title *</label>
                 <input type="text" name="title" value="{{title}}" required 
-                       class="w-full px-4 py-3 text-xl font-semibold border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                       class="cms-input text-xl font-semibold py-3">
             </div>
             
             <!-- Content Blocks -->
-            <div class="bg-white rounded-xl border border-gray-200 p-6">
-                <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <div class="cms-card">
+                <h2 class="cms-card-header">
                     <span class="material-symbols-outlined text-[#135bec]">widgets</span>
                     Content Blocks
                 </h2>
@@ -2541,24 +2657,24 @@ HTML,
         <!-- Sidebar -->
         <div class="space-y-6">
             <!-- Page Settings -->
-            <div class="bg-white rounded-xl border border-gray-200 p-6">
+            <div class="cms-card">
                 <h3 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                     <span class="material-symbols-outlined text-[#135bec]">settings</span>
                     Page Settings
                 </h3>
                 <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">URL Slug *</label>
+                        <label class="cms-label">URL Slug *</label>
                         <div class="flex items-center">
                             <span class="px-3 py-2 bg-gray-100 border border-r-0 border-gray-300 rounded-l-lg text-gray-500 text-sm">/</span>
                             <input type="text" name="slug" id="page-slug" value="{{slug}}" required pattern="[a-z0-9\-]+"
-                                   class="flex-1 px-3 py-2 border border-gray-300 rounded-r-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                                   class="cms-input rounded-l-none border-l-0 flex-1">
                         </div>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Status</label>
+                        <label class="cms-label">Status</label>
                         <select name="status"
-                                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                                class="cms-input">
                             <option value="draft" {{#if is_draft}}selected{{/if}}>Draft</option>
                             <option value="published" {{#if is_published}}selected{{/if}}>Published</option>
                         </select>
@@ -2567,7 +2683,7 @@ HTML,
             </div>
             
             <!-- Navigation -->
-            <div class="bg-white rounded-xl border border-gray-200 p-6">
+            <div class="cms-card">
                 <h3 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                     <span class="material-symbols-outlined text-[#135bec]">menu</span>
                     Navigation
@@ -2579,9 +2695,9 @@ HTML,
                         <span class="text-sm font-medium text-gray-700">Add to navigation menu</span>
                     </label>
                     <div id="nav-position-group" class="{{#if add_to_nav}}{{else}}hidden{{/if}}">
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Position</label>
+                        <label class="cms-label">Position</label>
                         <select name="nav_position" id="nav-position"
-                                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                                class="cms-input">
                             <option value="0">At the beginning</option>
                             {{#each nav_items}}
                             <option value="{{sort_order_after}}">After "{{label}}"</option>
@@ -2592,20 +2708,20 @@ HTML,
             </div>
             
             <!-- SEO Settings -->
-            <div class="bg-white rounded-xl border border-gray-200 p-6">
+            <div class="cms-card">
                 <h3 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                     <span class="material-symbols-outlined text-[#135bec]">search</span>
                     SEO
                 </h3>
                 <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Meta Description</label>
+                        <label class="cms-label">Meta Description</label>
                         <textarea name="meta_description" rows="3"
-                                  class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none resize-y">{{meta_description}}</textarea>
-                        <p class="text-xs text-gray-500 mt-1">Recommended: 150-160 characters</p>
+                                  class="cms-input">{{meta_description}}</textarea>
+                        <p class="cms-hint">Recommended: 150-160 characters</p>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">OG Image</label>
+                        <label class="cms-label">OG Image</label>
                         <div class="flex gap-2">
                             <input type="hidden" name="og_image" id="og-image-input" value="{{og_image}}">
                             <div id="og-image-preview" class="flex-1 min-h-[100px] border border-gray-300 rounded-lg bg-gray-50 flex items-center justify-center overflow-hidden">
@@ -2626,14 +2742,14 @@ HTML,
                                 </button>
                             </div>
                         </div>
-                        <p class="text-xs text-gray-500 mt-1">Recommended: 1200x630 pixels for social sharing</p>
+                        <p class="cms-hint">Recommended: 1200x630 pixels for social sharing</p>
                     </div>
                 </div>
             </div>
             
             <!-- Actions -->
-            <div class="bg-white rounded-xl border border-gray-200 p-6">
-                <button type="submit" class="w-full inline-flex items-center justify-center gap-2 px-4 py-3 bg-[#135bec] text-white font-medium rounded-lg hover:bg-[#0f4fd1] transition-colors">
+            <div class="cms-card">
+                <button type="submit" class="cms-btn w-full py-3">
                     <span class="material-symbols-outlined">save</span>
                     Save Page
                 </button>
@@ -2895,7 +3011,7 @@ HTML,
     <div class="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
         <div class="flex items-center justify-between p-4 border-b border-gray-200">
             <h3 class="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                <span class="material-symbols-outlined text-purple-600">auto_awesome</span>
+                <span class="material-symbols-outlined text-blue-600">auto_awesome</span>
                 AI Generate Page
             </h3>
             <button type="button" id="close-ai-modal" class="p-1 text-gray-500 hover:text-gray-700 rounded">
@@ -2905,8 +3021,8 @@ HTML,
         <div class="p-6 space-y-4">
             <!-- Page Type Selection -->
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-2">Page Type</label>
-                <select id="ai-page-type" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none">
+                <label class="cms-label">Page Type</label>
+                <select id="ai-page-type" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
                     <option value="landing">Landing Page (hero, features, testimonials, CTA)</option>
                     <option value="about">About Page (story, team, values, timeline)</option>
                     <option value="services">Services Page (offerings, pricing, process)</option>
@@ -2917,23 +3033,27 @@ HTML,
                     <option value="faq">FAQ Page (questions, categories)</option>
                     <option value="team">Team Page (members, culture, careers)</option>
                     <option value="product">Product Page (features, specs, reviews)</option>
+                    <option value="game">Game Page (embed a playable game)</option>
+                    <option value="linktree">Link Tree (social/link hub)</option>
+                    <option value="tool">Tool/App Embed (iframe or widget)</option>
+                    <option value="social">Social Hub (link tree + gallery)</option>
                     <option value="custom">Custom (AI decides structure)</option>
                 </select>
-                <p class="text-xs text-gray-500 mt-1">Select a page type for optimized block recommendations.</p>
+                <p class="cms-hint">Select a page type for optimized block recommendations.</p>
             </div>
             
             <!-- Recommended Blocks Preview -->
-            <div id="ai-block-recommendations" class="p-3 bg-purple-50 rounded-lg">
-                <p class="text-xs font-medium text-purple-700 mb-2">Recommended blocks for this page type:</p>
+            <div id="ai-block-recommendations" class="p-3 bg-blue-50 rounded-lg">
+                <p class="text-xs font-medium text-blue-700 mb-2">Recommended blocks for this page type:</p>
                 <div id="ai-recommended-blocks" class="flex flex-wrap gap-1 text-xs"></div>
             </div>
             
             <!-- Description -->
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-2">Describe your page</label>
+                <label class="cms-label">Describe your page</label>
                 <textarea id="ai-prompt" rows="4" placeholder="e.g., A services page for a digital marketing agency showcasing SEO, PPC, and social media marketing services with pricing tiers and a contact form..."
-                          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none resize-y"></textarea>
-                <p class="text-xs text-gray-500 mt-1">Be specific about the content, tone, and sections you want.</p>
+                          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none resize-y"></textarea>
+                <p class="cms-hint">Be specific about the content, tone, and sections you want.</p>
             </div>
             
             <!-- Advanced Options -->
@@ -2941,11 +3061,11 @@ HTML,
                 <summary class="px-4 py-2 text-sm font-medium text-gray-700 cursor-pointer hover:bg-gray-50">Advanced Options</summary>
                 <div class="p-4 pt-2 space-y-3 border-t border-gray-200">
                     <div class="flex items-center gap-3">
-                        <input type="checkbox" id="ai-multi-stage" checked class="rounded border-gray-300 text-purple-600 focus:ring-purple-500">
+                        <input type="checkbox" id="ai-multi-stage" checked class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
                         <label for="ai-multi-stage" class="text-sm text-gray-700">Multi-stage generation (better quality for complex pages)</label>
                     </div>
                     <div class="flex items-center gap-3">
-                        <input type="checkbox" id="ai-detailed-content" checked class="rounded border-gray-300 text-purple-600 focus:ring-purple-500">
+                        <input type="checkbox" id="ai-detailed-content" checked class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
                         <label for="ai-detailed-content" class="text-sm text-gray-700">Generate detailed content (more text, real examples)</label>
                     </div>
                 </div>
@@ -2955,15 +3075,15 @@ HTML,
             
             <!-- Multi-Stage Progress -->
             <div id="ai-progress" class="hidden space-y-3">
-                <div class="p-4 bg-purple-50 rounded-lg">
+                <div class="p-4 bg-blue-50 rounded-lg">
                     <div class="flex items-center gap-3 mb-3">
-                        <div class="animate-spin rounded-full h-5 w-5 border-2 border-purple-600 border-t-transparent"></div>
-                        <span id="ai-progress-text" class="text-purple-700 font-medium">Planning page layout...</span>
+                        <div class="animate-spin rounded-full h-5 w-5 border-2 border-blue-600 border-t-transparent"></div>
+                        <span id="ai-progress-text" class="text-blue-700 font-medium">Planning page layout...</span>
                     </div>
                     <div class="space-y-2">
                         <div class="flex items-center gap-2">
-                            <div id="stage-1-icon" class="w-5 h-5 rounded-full bg-purple-200 flex items-center justify-center">
-                                <span class="material-symbols-outlined text-sm text-purple-600">hourglass_top</span>
+                            <div id="stage-1-icon" class="w-5 h-5 rounded-full bg-blue-200 flex items-center justify-center">
+                                <span class="material-symbols-outlined text-sm text-blue-600">hourglass_top</span>
                             </div>
                             <span class="text-sm text-gray-600">Stage 1: Plan layout & structure</span>
                         </div>
@@ -2987,7 +3107,7 @@ HTML,
             <button type="button" id="cancel-ai" class="flex-1 px-4 py-2.5 bg-gray-100 text-gray-700 font-medium rounded-lg hover:bg-gray-200 transition-colors">
                 Cancel
             </button>
-            <button type="button" id="submit-ai" class="flex-1 px-4 py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-medium rounded-lg hover:from-purple-700 hover:to-indigo-700 transition-all">
+            <button type="button" id="submit-ai" class="cms-btn flex-1">
                 Generate
             </button>
         </div>
@@ -3001,106 +3121,106 @@ HTML,
 let blockCounter = {{block_count}};
 const blockTemplates = {
     hero: `<div class="space-y-3">
-           <div><label class="block text-sm font-medium text-gray-700 mb-1">Heading</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Welcome to our site" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-           <div><label class="block text-sm font-medium text-gray-700 mb-1">Subtitle</label><input type="text" name="blocks[NEW_ID][data][subtitle]" placeholder="We make amazing things" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-           <div class="grid grid-cols-2 gap-3"><div><label class="block text-sm font-medium text-gray-700 mb-1">Button Text</label><input type="text" name="blocks[NEW_ID][data][button]" placeholder="Learn More" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div><div><label class="block text-sm font-medium text-gray-700 mb-1">Button URL</label><input type="text" name="blocks[NEW_ID][data][url]" placeholder="/about" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div></div></div>`,
-    text: `<div><label class="block text-sm font-medium text-gray-700 mb-1">Content</label><div class="wysiwyg-editor bg-white border border-gray-300 rounded-lg" data-field="NEW_ID"></div><textarea name="blocks[NEW_ID][data][content]" class="wysiwyg-content hidden"></textarea></div>`,
+           <div><label class="cms-label">Heading</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Welcome to our site" class="cms-input"></div>
+           <div><label class="cms-label">Subtitle</label><input type="text" name="blocks[NEW_ID][data][subtitle]" placeholder="We make amazing things" class="cms-input"></div>
+           <div class="grid grid-cols-2 gap-3"><div><label class="cms-label">Button Text</label><input type="text" name="blocks[NEW_ID][data][button]" placeholder="Learn More" class="cms-input"></div><div><label class="cms-label">Button URL</label><input type="text" name="blocks[NEW_ID][data][url]" placeholder="/about" class="cms-input"></div></div></div>`,
+    text: `<div><label class="cms-label">Content</label><div class="wysiwyg-editor bg-white border border-gray-300 rounded-lg" data-field="NEW_ID"></div><textarea name="blocks[NEW_ID][data][content]" class="wysiwyg-content hidden"></textarea></div>`,
     image: `<div class="space-y-3">
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Image URL</label><input type="text" name="blocks[NEW_ID][data][url]" placeholder="/assets/..." class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Alt Text</label><input type="text" name="blocks[NEW_ID][data][alt]" placeholder="Image description" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Caption</label><input type="text" name="blocks[NEW_ID][data][caption]" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div></div>`,
+            <div><label class="cms-label">Image URL</label><input type="text" name="blocks[NEW_ID][data][url]" placeholder="/assets/..." class="cms-input"></div>
+            <div><label class="cms-label">Alt Text</label><input type="text" name="blocks[NEW_ID][data][alt]" placeholder="Image description" class="cms-input"></div>
+            <div><label class="cms-label">Caption</label><input type="text" name="blocks[NEW_ID][data][caption]" class="cms-input"></div></div>`,
     cta: `<div class="space-y-3">
-          <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Ready to get started?" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-          <div><label class="block text-sm font-medium text-gray-700 mb-1">Text</label><textarea name="blocks[NEW_ID][data][text]" rows="2" placeholder="Join thousands of satisfied customers..." class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></textarea></div>
-          <div class="grid grid-cols-2 gap-3"><div><label class="block text-sm font-medium text-gray-700 mb-1">Button Text</label><input type="text" name="blocks[NEW_ID][data][button]" placeholder="Get Started" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div><div><label class="block text-sm font-medium text-gray-700 mb-1">Button URL</label><input type="text" name="blocks[NEW_ID][data][url]" placeholder="/contact" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div></div></div>`,
+          <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Ready to get started?" class="cms-input"></div>
+          <div><label class="cms-label">Text</label><textarea name="blocks[NEW_ID][data][text]" rows="2" placeholder="Join thousands of satisfied customers..." class="cms-input"></textarea></div>
+          <div class="grid grid-cols-2 gap-3"><div><label class="cms-label">Button Text</label><input type="text" name="blocks[NEW_ID][data][button]" placeholder="Get Started" class="cms-input"></div><div><label class="cms-label">Button URL</label><input type="text" name="blocks[NEW_ID][data][url]" placeholder="/contact" class="cms-input"></div></div></div>`,
     gallery: `<div class="space-y-3">
-              <div><label class="block text-sm font-medium text-gray-700 mb-1">Images (one URL per line)</label><textarea name="blocks[NEW_ID][data][images]" rows="4" placeholder="/assets/img1.jpg&#10;/assets/img2.jpg" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></textarea></div>
-              <div><label class="block text-sm font-medium text-gray-700 mb-1">Columns</label><select name="blocks[NEW_ID][data][columns]" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option></select></div></div>`,
+              <div><label class="cms-label">Images (one URL per line)</label><textarea name="blocks[NEW_ID][data][images]" rows="4" placeholder="/assets/img1.jpg&#10;/assets/img2.jpg" class="cms-input"></textarea></div>
+              <div><label class="cms-label">Columns</label><select name="blocks[NEW_ID][data][columns]" class="cms-input"><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option></select></div></div>`,
     form: `<div class="p-4 bg-blue-50 rounded-lg"><p class="text-sm text-blue-700 flex items-center gap-2"><span class="material-symbols-outlined">info</span>This block displays a contact form. No additional configuration needed.</p></div>`,
     features: `<div class="space-y-3">
-               <div><label class="block text-sm font-medium text-gray-700 mb-1">Section Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Our Features" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-               <div><label class="block text-sm font-medium text-gray-700 mb-1">Items (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"icon": "⚡", "title": "Feature 1", "description": "Description here"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`,
-    stats: `<div><label class="block text-sm font-medium text-gray-700 mb-1">Stats Items (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="4" placeholder='[{"value": "100+", "label": "Customers"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div>`,
-    testimonials: `<div><label class="block text-sm font-medium text-gray-700 mb-1">Testimonials (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"quote": "Great product!", "author": "John Doe", "role": "CEO"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div>`,
+               <div><label class="cms-label">Section Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Our Features" class="cms-input"></div>
+               <div><label class="cms-label">Items (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"icon": "⚡", "title": "Feature 1", "description": "Description here"}]' class="cms-input font-mono"></textarea></div></div>`,
+    stats: `<div><label class="cms-label">Stats Items (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="4" placeholder='[{"value": "100+", "label": "Customers"}]' class="cms-input font-mono"></textarea></div>`,
+    testimonials: `<div><label class="cms-label">Testimonials (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"quote": "Great product!", "author": "John Doe", "role": "CEO"}]' class="cms-input font-mono"></textarea></div>`,
     pricing: `<div class="space-y-3">
-              <div><label class="block text-sm font-medium text-gray-700 mb-1">Section Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Pricing Plans" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-              <div><label class="block text-sm font-medium text-gray-700 mb-1">Plans (JSON array)</label><textarea name="blocks[NEW_ID][data][plans_json]" rows="8" placeholder='[{"name": "Basic", "price": "$9/mo", "features": ["Feature 1"], "button": "Get Started", "url": "/signup"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`,
+              <div><label class="cms-label">Section Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Pricing Plans" class="cms-input"></div>
+              <div><label class="cms-label">Plans (JSON array)</label><textarea name="blocks[NEW_ID][data][plans_json]" rows="8" placeholder='[{"name": "Basic", "price": "$9/mo", "features": ["Feature 1"], "button": "Get Started", "url": "/signup"}]' class="cms-input font-mono"></textarea></div></div>`,
     team: `<div class="space-y-3">
-           <div><label class="block text-sm font-medium text-gray-700 mb-1">Section Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Our Team" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-           <div><label class="block text-sm font-medium text-gray-700 mb-1">Members (JSON array)</label><textarea name="blocks[NEW_ID][data][members_json]" rows="6" placeholder='[{"name": "John Doe", "role": "CEO", "bio": "Bio here"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`,
+           <div><label class="cms-label">Section Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Our Team" class="cms-input"></div>
+           <div><label class="cms-label">Members (JSON array)</label><textarea name="blocks[NEW_ID][data][members_json]" rows="6" placeholder='[{"name": "John Doe", "role": "CEO", "bio": "Bio here"}]' class="cms-input font-mono"></textarea></div></div>`,
     cards: `<div class="space-y-3">
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Section Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Our Services" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Cards (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"icon": "🎯", "title": "Card 1", "description": "Description"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`,
+            <div><label class="cms-label">Section Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Our Services" class="cms-input"></div>
+            <div><label class="cms-label">Cards (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"icon": "🎯", "title": "Card 1", "description": "Description"}]' class="cms-input font-mono"></textarea></div></div>`,
     faq: `<div class="space-y-3">
-          <div><label class="block text-sm font-medium text-gray-700 mb-1">Section Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="FAQ" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-          <div><label class="block text-sm font-medium text-gray-700 mb-1">Questions (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"question": "How does it work?", "answer": "It works by..."}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`,
+          <div><label class="cms-label">Section Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="FAQ" class="cms-input"></div>
+          <div><label class="cms-label">Questions (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"question": "How does it work?", "answer": "It works by..."}]' class="cms-input font-mono"></textarea></div></div>`,
     // === NEW BLOCK TYPES ===
     quote: `<div class="space-y-3">
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Quote Text</label><textarea name="blocks[NEW_ID][data][text]" rows="3" placeholder="Inspirational quote..." class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></textarea></div>
-            <div class="grid grid-cols-2 gap-3"><div><label class="block text-sm font-medium text-gray-700 mb-1">Author</label><input type="text" name="blocks[NEW_ID][data][author]" placeholder="Author Name" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div><div><label class="block text-sm font-medium text-gray-700 mb-1">Role/Title</label><input type="text" name="blocks[NEW_ID][data][role]" placeholder="CEO, Company" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div></div></div>`,
+            <div><label class="cms-label">Quote Text</label><textarea name="blocks[NEW_ID][data][text]" rows="3" placeholder="Inspirational quote..." class="cms-input"></textarea></div>
+            <div class="grid grid-cols-2 gap-3"><div><label class="cms-label">Author</label><input type="text" name="blocks[NEW_ID][data][author]" placeholder="Author Name" class="cms-input"></div><div><label class="cms-label">Role/Title</label><input type="text" name="blocks[NEW_ID][data][role]" placeholder="CEO, Company" class="cms-input"></div></div></div>`,
     divider: `<div class="space-y-3">
-              <div><label class="block text-sm font-medium text-gray-700 mb-1">Style</label><select name="blocks[NEW_ID][data][style]" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"><option value="line">Line</option><option value="dots">Dots</option><option value="icon">Icon</option></select></div>
-              <div><label class="block text-sm font-medium text-gray-700 mb-1">Icon (for icon style)</label><input type="text" name="blocks[NEW_ID][data][icon]" placeholder="⭐" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div></div>`,
+              <div><label class="cms-label">Style</label><select name="blocks[NEW_ID][data][style]" class="cms-input"><option value="line">Line</option><option value="dots">Dots</option><option value="icon">Icon</option></select></div>
+              <div><label class="cms-label">Icon (for icon style)</label><input type="text" name="blocks[NEW_ID][data][icon]" placeholder="⭐" class="cms-input"></div></div>`,
     video: `<div class="space-y-3">
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Watch Our Story" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Video Embed URL</label><input type="text" name="blocks[NEW_ID][data][url]" placeholder="https://youtube.com/embed/..." class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Caption</label><input type="text" name="blocks[NEW_ID][data][caption]" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div></div>`,
-    carousel: `<div><label class="block text-sm font-medium text-gray-700 mb-1">Slides (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"image": "/slide1.jpg", "title": "Slide 1", "text": "Description"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div>`,
+            <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Watch Our Story" class="cms-input"></div>
+            <div><label class="cms-label">Video Embed URL</label><input type="text" name="blocks[NEW_ID][data][url]" placeholder="https://youtube.com/embed/..." class="cms-input"></div>
+            <div><label class="cms-label">Caption</label><input type="text" name="blocks[NEW_ID][data][caption]" class="cms-input"></div></div>`,
+    carousel: `<div><label class="cms-label">Slides (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"image": "/slide1.jpg", "title": "Slide 1", "text": "Description"}]' class="cms-input font-mono"></textarea></div>`,
     checklist: `<div class="space-y-3">
-                <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="What's Included" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-                <div><label class="block text-sm font-medium text-gray-700 mb-1">Items (one per line)</label><textarea name="blocks[NEW_ID][data][items_text]" rows="5" placeholder="Feature one\nFeature two\nFeature three" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></textarea></div></div>`,
+                <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="What's Included" class="cms-input"></div>
+                <div><label class="cms-label">Items (one per line)</label><textarea name="blocks[NEW_ID][data][items_text]" rows="5" placeholder="Feature one\nFeature two\nFeature three" class="cms-input"></textarea></div></div>`,
     logo_cloud: `<div class="space-y-3">
-                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Trusted By" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Logos (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="4" placeholder='[{"name": "Company", "url": "/logo.png"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`,
+                 <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Trusted By" class="cms-input"></div>
+                 <div><label class="cms-label">Logos (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="4" placeholder='[{"name": "Company", "url": "/logo.png"}]' class="cms-input font-mono"></textarea></div></div>`,
     comparison: `<div class="space-y-3">
-                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Compare Plans" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Headers (JSON array)</label><input type="text" name="blocks[NEW_ID][data][headers_json]" placeholder='["Feature", "Basic", "Pro"]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></div>
-                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Rows (JSON array of arrays)</label><textarea name="blocks[NEW_ID][data][rows_json]" rows="4" placeholder='[["Storage", "10GB", "100GB"], ["Support", "Email", "24/7"]]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`,
-    tabs: `<div><label class="block text-sm font-medium text-gray-700 mb-1">Tabs (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"label": "Tab 1", "content": "<p>Tab content...</p>"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div>`,
+                 <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Compare Plans" class="cms-input"></div>
+                 <div><label class="cms-label">Headers (JSON array)</label><input type="text" name="blocks[NEW_ID][data][headers_json]" placeholder='["Feature", "Basic", "Pro"]' class="cms-input font-mono"></div>
+                 <div><label class="cms-label">Rows (JSON array of arrays)</label><textarea name="blocks[NEW_ID][data][rows_json]" rows="4" placeholder='[["Storage", "10GB", "100GB"], ["Support", "Email", "24/7"]]' class="cms-input font-mono"></textarea></div></div>`,
+    tabs: `<div><label class="cms-label">Tabs (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"label": "Tab 1", "content": "<p>Tab content...</p>"}]' class="cms-input font-mono"></textarea></div>`,
     accordion: `<div class="space-y-3">
-                <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Learn More" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-                <div><label class="block text-sm font-medium text-gray-700 mb-1">Sections (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"title": "Section 1", "content": "<p>Content...</p>"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`,
+                <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Learn More" class="cms-input"></div>
+                <div><label class="cms-label">Sections (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"title": "Section 1", "content": "<p>Content...</p>"}]' class="cms-input font-mono"></textarea></div></div>`,
     table: `<div class="space-y-3">
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Data Table" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Headers (JSON array)</label><input type="text" name="blocks[NEW_ID][data][headers_json]" placeholder='["Name", "Price", "Status"]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></div>
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Rows (JSON array of arrays)</label><textarea name="blocks[NEW_ID][data][rows_json]" rows="4" placeholder='[["Item 1", "$10", "Active"]]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`,
+            <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Data Table" class="cms-input"></div>
+            <div><label class="cms-label">Headers (JSON array)</label><input type="text" name="blocks[NEW_ID][data][headers_json]" placeholder='["Name", "Price", "Status"]' class="cms-input font-mono"></div>
+            <div><label class="cms-label">Rows (JSON array of arrays)</label><textarea name="blocks[NEW_ID][data][rows_json]" rows="4" placeholder='[["Item 1", "$10", "Active"]]' class="cms-input font-mono"></textarea></div></div>`,
     timeline: `<div class="space-y-3">
-               <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Our Journey" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-               <div><label class="block text-sm font-medium text-gray-700 mb-1">Events (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"date": "2024", "title": "Founded", "description": "We started..."}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`,
+               <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Our Journey" class="cms-input"></div>
+               <div><label class="cms-label">Events (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"date": "2024", "title": "Founded", "description": "We started..."}]' class="cms-input font-mono"></textarea></div></div>`,
     list: `<div class="space-y-3">
-           <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-           <div><label class="block text-sm font-medium text-gray-700 mb-1">Style</label><select name="blocks[NEW_ID][data][style]" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"><option value="bullet">Bullet</option><option value="number">Numbered</option><option value="check">Checkmarks</option></select></div>
-           <div><label class="block text-sm font-medium text-gray-700 mb-1">Items (one per line)</label><textarea name="blocks[NEW_ID][data][items_text]" rows="5" placeholder="First item\nSecond item\nThird item" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></textarea></div></div>`,
+           <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" class="cms-input"></div>
+           <div><label class="cms-label">Style</label><select name="blocks[NEW_ID][data][style]" class="cms-input"><option value="bullet">Bullet</option><option value="number">Numbered</option><option value="check">Checkmarks</option></select></div>
+           <div><label class="cms-label">Items (one per line)</label><textarea name="blocks[NEW_ID][data][items_text]" rows="5" placeholder="First item\nSecond item\nThird item" class="cms-input"></textarea></div></div>`,
     newsletter: `<div class="space-y-3">
-                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Stay Updated" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Text</label><textarea name="blocks[NEW_ID][data][text]" rows="2" placeholder="Subscribe to our newsletter..." class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></textarea></div>
-                 <div class="grid grid-cols-2 gap-3"><div><label class="block text-sm font-medium text-gray-700 mb-1">Button Text</label><input type="text" name="blocks[NEW_ID][data][button]" value="Subscribe" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div><div><label class="block text-sm font-medium text-gray-700 mb-1">Placeholder</label><input type="text" name="blocks[NEW_ID][data][placeholder]" value="Enter your email" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div></div></div>`,
+                 <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Stay Updated" class="cms-input"></div>
+                 <div><label class="cms-label">Text</label><textarea name="blocks[NEW_ID][data][text]" rows="2" placeholder="Subscribe to our newsletter..." class="cms-input"></textarea></div>
+                 <div class="grid grid-cols-2 gap-3"><div><label class="cms-label">Button Text</label><input type="text" name="blocks[NEW_ID][data][button]" value="Subscribe" class="cms-input"></div><div><label class="cms-label">Placeholder</label><input type="text" name="blocks[NEW_ID][data][placeholder]" value="Enter your email" class="cms-input"></div></div></div>`,
     download: `<div class="space-y-3">
-               <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Download Our Guide" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-               <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><textarea name="blocks[NEW_ID][data][description]" rows="2" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></textarea></div>
-               <div class="grid grid-cols-2 gap-3"><div><label class="block text-sm font-medium text-gray-700 mb-1">File URL</label><input type="text" name="blocks[NEW_ID][data][file]" placeholder="/files/guide.pdf" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div><div><label class="block text-sm font-medium text-gray-700 mb-1">Button Text</label><input type="text" name="blocks[NEW_ID][data][button]" value="Download Now" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div></div></div>`,
+               <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Download Our Guide" class="cms-input"></div>
+               <div><label class="cms-label">Description</label><textarea name="blocks[NEW_ID][data][description]" rows="2" class="cms-input"></textarea></div>
+               <div class="grid grid-cols-2 gap-3"><div><label class="cms-label">File URL</label><input type="text" name="blocks[NEW_ID][data][file]" placeholder="/files/guide.pdf" class="cms-input"></div><div><label class="cms-label">Button Text</label><input type="text" name="blocks[NEW_ID][data][button]" value="Download Now" class="cms-input"></div></div></div>`,
     alert: `<div class="space-y-3">
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Type</label><select name="blocks[NEW_ID][data][type]" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"><option value="info">Info</option><option value="success">Success</option><option value="warning">Warning</option><option value="error">Error</option></select></div>
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Message</label><textarea name="blocks[NEW_ID][data][text]" rows="2" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></textarea></div></div>`,
+            <div><label class="cms-label">Type</label><select name="blocks[NEW_ID][data][type]" class="cms-input"><option value="info">Info</option><option value="success">Success</option><option value="warning">Warning</option><option value="error">Error</option></select></div>
+            <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" class="cms-input"></div>
+            <div><label class="cms-label">Message</label><textarea name="blocks[NEW_ID][data][text]" rows="2" class="cms-input"></textarea></div></div>`,
     progress: `<div class="space-y-3">
-               <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Our Skills" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-               <div><label class="block text-sm font-medium text-gray-700 mb-1">Progress Items (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="4" placeholder='[{"label": "Design", "value": 90}, {"label": "Development", "value": 85}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`,
+               <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Our Skills" class="cms-input"></div>
+               <div><label class="cms-label">Progress Items (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="4" placeholder='[{"label": "Design", "value": 90}, {"label": "Development", "value": 85}]' class="cms-input font-mono"></textarea></div></div>`,
     steps: `<div class="space-y-3">
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="How It Works" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-            <div><label class="block text-sm font-medium text-gray-700 mb-1">Steps (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"number": 1, "title": "Sign Up", "description": "Create account"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`,
-    columns: `<div><label class="block text-sm font-medium text-gray-700 mb-1">Columns (JSON array)</label><textarea name="blocks[NEW_ID][data][columns_json]" rows="6" placeholder='[{"content": "<p>Column 1</p>"}, {"content": "<p>Column 2</p>"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div>`,
-    spacer: `<div><label class="block text-sm font-medium text-gray-700 mb-1">Size</label><select name="blocks[NEW_ID][data][size]" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"><option value="small">Small (1rem)</option><option value="medium" selected>Medium (2rem)</option><option value="large">Large (4rem)</option><option value="xlarge">Extra Large (6rem)</option></select></div>`,
+            <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="How It Works" class="cms-input"></div>
+            <div><label class="cms-label">Steps (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="6" placeholder='[{"number": 1, "title": "Sign Up", "description": "Create account"}]' class="cms-input font-mono"></textarea></div></div>`,
+    columns: `<div><label class="cms-label">Columns (JSON array)</label><textarea name="blocks[NEW_ID][data][columns_json]" rows="6" placeholder='[{"content": "<p>Column 1</p>"}, {"content": "<p>Column 2</p>"}]' class="cms-input font-mono"></textarea></div>`,
+    spacer: `<div><label class="cms-label">Size</label><select name="blocks[NEW_ID][data][size]" class="cms-input"><option value="small">Small (1rem)</option><option value="medium" selected>Medium (2rem)</option><option value="large">Large (4rem)</option><option value="xlarge">Extra Large (6rem)</option></select></div>`,
     map: `<div class="space-y-3">
-          <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Find Us" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-          <div><label class="block text-sm font-medium text-gray-700 mb-1">Address</label><input type="text" name="blocks[NEW_ID][data][address]" placeholder="123 Main St, City, Country" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-          <div><label class="block text-sm font-medium text-gray-700 mb-1">Google Maps Embed URL</label><input type="text" name="blocks[NEW_ID][data][embed]" placeholder="https://maps.google.com/maps?..." class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div></div>`,
+          <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Find Us" class="cms-input"></div>
+          <div><label class="cms-label">Address</label><input type="text" name="blocks[NEW_ID][data][address]" placeholder="123 Main St, City, Country" class="cms-input"></div>
+          <div><label class="cms-label">Google Maps Embed URL</label><input type="text" name="blocks[NEW_ID][data][embed]" placeholder="https://maps.google.com/maps?..." class="cms-input"></div></div>`,
     contact_info: `<div class="space-y-3">
-                   <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Contact Information" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-                   <div><label class="block text-sm font-medium text-gray-700 mb-1">Contact Items (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="5" placeholder='[{"icon": "📧", "label": "Email", "value": "hello@example.com", "url": "mailto:hello@example.com"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`,
+                   <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Contact Information" class="cms-input"></div>
+                   <div><label class="cms-label">Contact Items (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="5" placeholder='[{"icon": "📧", "label": "Email", "value": "hello@example.com", "url": "mailto:hello@example.com"}]' class="cms-input font-mono"></textarea></div></div>`,
     social: `<div class="space-y-3">
-             <div><label class="block text-sm font-medium text-gray-700 mb-1">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Follow Us" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></div>
-             <div><label class="block text-sm font-medium text-gray-700 mb-1">Social Links (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="4" placeholder='[{"platform": "twitter", "url": "https://twitter.com/...", "icon": "🐦"}]' class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none font-mono text-sm"></textarea></div></div>`
+             <div><label class="cms-label">Title</label><input type="text" name="blocks[NEW_ID][data][title]" placeholder="Follow Us" class="cms-input"></div>
+             <div><label class="cms-label">Social Links (JSON array)</label><textarea name="blocks[NEW_ID][data][items_json]" rows="4" placeholder='[{"platform": "twitter", "url": "https://twitter.com/...", "icon": "🐦"}]' class="cms-input font-mono"></textarea></div></div>`
 };
 const typeLabels = {
     hero:'Hero Section',text:'Text Content',image:'Image',cta:'Call to Action',gallery:'Gallery',form:'Contact Form',
@@ -3388,6 +3508,10 @@ const pageTypeBlocks = {
     faq: ['hero', 'faq', 'accordion', 'contact_info', 'cta'],
     team: ['hero', 'team', 'text', 'stats', 'testimonials', 'cta'],
     product: ['hero', 'features', 'gallery', 'stats', 'testimonials', 'comparison', 'pricing', 'faq', 'cta'],
+    game: ['hero', 'game', 'text', 'features', 'cta'],
+    linktree: ['link_tree'],
+    tool: ['hero', 'embed', 'text', 'faq', 'cta'],
+    social: ['hero', 'link_tree', 'gallery', 'cta'],
     custom: ['hero', 'text', 'features', 'cta']
 };
 
@@ -3396,7 +3520,7 @@ function updateBlockRecommendations() {
     const blocks = pageTypeBlocks[type] || pageTypeBlocks.custom;
     if (aiRecommendedBlocks) {
         aiRecommendedBlocks.innerHTML = blocks.map(b => 
-            `<span class="px-2 py-1 bg-purple-100 text-purple-700 rounded">${typeLabels[b] || b}</span>`
+            `<span class="px-2 py-1 bg-primary/10 text-primary rounded">${typeLabels[b] || b}</span>`
         ).join('');
     }
 }
@@ -3421,8 +3545,8 @@ function updateStageUI(stage, status) {
     const icon = document.getElementById(`stage-${stage}-icon`);
     if (!icon) return;
     if (status === 'active') {
-        icon.className = 'w-5 h-5 rounded-full bg-purple-200 flex items-center justify-center';
-        icon.innerHTML = '<span class="material-symbols-outlined text-sm text-purple-600 animate-spin">hourglass_top</span>';
+        icon.className = 'w-5 h-5 rounded-full bg-blue-200 flex items-center justify-center';
+        icon.innerHTML = '<span class="material-symbols-outlined text-sm text-blue-600 animate-spin">hourglass_top</span>';
     } else if (status === 'done') {
         icon.className = 'w-5 h-5 rounded-full bg-green-200 flex items-center justify-center';
         icon.innerHTML = '<span class="material-symbols-outlined text-sm text-green-600">check</span>';
@@ -3639,26 +3763,28 @@ HTML,
             // ─── ADMIN: NAVIGATION ───────────────────────────────────────
             'admin/nav' => <<<'HTML'
 <!-- Page Header -->
-<div class="mb-8">
-    <h1 class="text-2xl font-bold text-gray-900">Navigation</h1>
-    <p class="text-gray-600 mt-1">Manage your site's menu items. Drag to reorder.</p>
+<div class="cms-page-header">
+    <div>
+        <h1 class="cms-page-title">Navigation</h1>
+        <p class="cms-page-subtitle">Manage your site's menu items. Drag to reorder.</p>
+    </div>
 </div>
 
 {{#if flash_error}}
-<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-red-600">error</span>
-    <span class="text-red-800">{{flash_error}}</span>
+<div class="cms-alert cms-alert-error">
+    <span class="material-symbols-outlined">error</span>
+    <span>{{flash_error}}</span>
 </div>
 {{/if}}
 
 {{#if flash_success}}
-<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-green-600">check_circle</span>
-    <span class="text-green-800">{{flash_success}}</span>
+<div class="cms-alert cms-alert-success">
+    <span class="material-symbols-outlined">check_circle</span>
+    <span>{{flash_success}}</span>
 </div>
 {{/if}}
 
-<div class="bg-white rounded-xl border border-gray-200 p-6">
+<div class="cms-card">
     <form method="post" action="/admin/nav" id="nav-form">
         {{{csrf_field}}}
         
@@ -3675,7 +3801,7 @@ HTML,
                            class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
                     <label class="flex items-center gap-2 text-sm text-gray-600">
                         <input type="checkbox" name="nav[{{id}}][visible]" value="1" {{#if visible}}checked{{/if}}
-                               class="w-4 h-4 rounded border-gray-300 text-[#135bec] focus:ring-[#135bec]">
+                               class="size-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500">
                         Visible
                     </label>
                     <input type="hidden" name="nav[{{id}}][id]" value="{{id}}">
@@ -3689,11 +3815,11 @@ HTML,
         </div>
         
         <div class="mt-6 flex items-center gap-3 pt-6 border-t border-gray-200">
-            <button type="button" data-action="add-nav-item" class="inline-flex items-center gap-2 px-4 py-2.5 bg-gray-100 text-gray-700 font-medium rounded-lg hover:bg-gray-200 transition-colors">
+            <button type="button" data-action="add-nav-item" class="cms-btn-ghost">
                 <span class="material-symbols-outlined text-xl">add</span>
                 Add Menu Item
             </button>
-            <button type="submit" class="inline-flex items-center gap-2 px-6 py-2.5 bg-[#135bec] text-white font-medium rounded-lg hover:bg-[#0f4fd1] transition-colors">
+            <button type="submit" class="cms-btn">
                 <span class="material-symbols-outlined text-xl">save</span>
                 Save Navigation
             </button>
@@ -3725,7 +3851,7 @@ function addNavItem() {
                    class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
             <label class="flex items-center gap-2 text-sm text-gray-600">
                 <input type="checkbox" name="nav[${id}][visible]" value="1" checked
-                       class="w-4 h-4 rounded border-gray-300 text-[#135bec] focus:ring-[#135bec]">
+                       class="size-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500">
                 Visible
             </label>
             <input type="hidden" name="nav[${id}][id]" value="">
@@ -3803,22 +3929,24 @@ HTML,
             // ─── ADMIN: MEDIA LIBRARY ────────────────────────────────────
             'admin/media' => <<<'HTML'
 <!-- Page Header -->
-<div class="mb-8">
-    <h1 class="text-2xl font-bold text-gray-900">Media Library</h1>
-    <p class="text-gray-600 mt-1">Upload and manage images and documents for your site.</p>
+<div class="cms-page-header">
+    <div>
+        <h1 class="cms-page-title">Media Library</h1>
+        <p class="cms-page-subtitle">Upload and manage images and documents for your site.</p>
+    </div>
 </div>
 
 {{#if flash_error}}
-<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-red-600">error</span>
-    <span class="text-red-800">{{flash_error}}</span>
+<div class="cms-alert cms-alert-error">
+    <span class="material-symbols-outlined">error</span>
+    <span>{{flash_error}}</span>
 </div>
 {{/if}}
 
 {{#if flash_success}}
-<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-green-600">check_circle</span>
-    <span class="text-green-800">{{flash_success}}</span>
+<div class="cms-alert cms-alert-success">
+    <span class="material-symbols-outlined">check_circle</span>
+    <span>{{flash_success}}</span>
 </div>
 {{/if}}
 
@@ -3954,22 +4082,24 @@ HTML,
             // ─── ADMIN: THEME SETTINGS ───────────────────────────────────
             'admin/theme' => <<<'HTML'
 <!-- Page Header -->
-<div class="mb-8">
-    <h1 class="text-2xl font-bold text-gray-900">Theme Settings</h1>
-    <p class="text-gray-600 mt-1">Customize your site's appearance, colors, and branding.</p>
+<div class="cms-page-header">
+    <div>
+        <h1 class="cms-page-title">Theme Settings</h1>
+        <p class="cms-page-subtitle">Customize your site's appearance, colors, and branding.</p>
+    </div>
 </div>
 
 {{#if flash_error}}
-<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-red-600">error</span>
-    <span class="text-red-800">{{flash_error}}</span>
+<div class="cms-alert cms-alert-error">
+    <span class="material-symbols-outlined">error</span>
+    <span>{{flash_error}}</span>
 </div>
 {{/if}}
 
 {{#if flash_success}}
-<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-green-600">check_circle</span>
-    <span class="text-green-800">{{flash_success}}</span>
+<div class="cms-alert cms-alert-success">
+    <span class="material-symbols-outlined">check_circle</span>
+    <span>{{flash_success}}</span>
 </div>
 {{/if}}
 
@@ -3977,32 +4107,32 @@ HTML,
     {{{csrf_field}}}
     
     <!-- Site Identity -->
-    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-6">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+    <div class="cms-card">
+        <h2 class="cms-card-header">
             <span class="material-symbols-outlined text-[#135bec]">badge</span>
             Site Identity
         </h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Site Name *</label>
+                <label class="cms-label">Site Name *</label>
                 <input type="text" name="site_name" value="{{site_name}}" required
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                       class="cms-input">
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Tagline</label>
+                <label class="cms-label">Tagline</label>
                 <input type="text" name="tagline" value="{{tagline}}"
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                       class="cms-input">
             </div>
             <div class="md:col-span-2">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Logo URL</label>
+                <label class="cms-label">Logo URL</label>
                 <input type="url" name="logo_url" value="{{logo_url}}" placeholder="/assets/..."
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                       class="cms-input">
             </div>
         </div>
     </div>
     
     <!-- Color Palette -->
-    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-6">
+    <div class="cms-card">
         <h2 class="text-lg font-semibold text-gray-900 mb-2 flex items-center gap-2">
             <span class="material-symbols-outlined text-[#135bec]">palette</span>
             Color Palette
@@ -4013,7 +4143,7 @@ HTML,
         <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Light Mode</h3>
         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-2">Primary</label>
+                <label class="cms-label">Primary</label>
                 <div class="flex items-center gap-2">
                     <input type="color" name="color_primary" value="{{color_primary}}"
                            class="w-10 h-10 rounded-lg border-2 border-gray-200 cursor-pointer p-0">
@@ -4022,7 +4152,7 @@ HTML,
                 </div>
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-2">Secondary</label>
+                <label class="cms-label">Secondary</label>
                 <div class="flex items-center gap-2">
                     <input type="color" name="color_secondary" value="{{color_secondary}}"
                            class="w-10 h-10 rounded-lg border-2 border-gray-200 cursor-pointer p-0">
@@ -4031,7 +4161,7 @@ HTML,
                 </div>
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-2">Accent</label>
+                <label class="cms-label">Accent</label>
                 <div class="flex items-center gap-2">
                     <input type="color" name="color_accent" value="{{color_accent}}"
                            class="w-10 h-10 rounded-lg border-2 border-gray-200 cursor-pointer p-0">
@@ -4040,7 +4170,7 @@ HTML,
                 </div>
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-2">Background</label>
+                <label class="cms-label">Background</label>
                 <div class="flex items-center gap-2">
                     <input type="color" name="color_background" value="{{color_background}}"
                            class="w-10 h-10 rounded-lg border-2 border-gray-200 cursor-pointer p-0">
@@ -4049,7 +4179,7 @@ HTML,
                 </div>
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-2">Text</label>
+                <label class="cms-label">Text</label>
                 <div class="flex items-center gap-2">
                     <input type="color" name="color_text" value="{{color_text}}"
                            class="w-10 h-10 rounded-lg border-2 border-gray-200 cursor-pointer p-0">
@@ -4063,7 +4193,7 @@ HTML,
         <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Dark Mode</h3>
         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-2">Primary</label>
+                <label class="cms-label">Primary</label>
                 <div class="flex items-center gap-2">
                     <input type="color" name="color_primary_dark" value="{{color_primary_dark}}"
                            class="w-10 h-10 rounded-lg border-2 border-gray-200 cursor-pointer p-0">
@@ -4072,7 +4202,7 @@ HTML,
                 </div>
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-2">Secondary</label>
+                <label class="cms-label">Secondary</label>
                 <div class="flex items-center gap-2">
                     <input type="color" name="color_secondary_dark" value="{{color_secondary_dark}}"
                            class="w-10 h-10 rounded-lg border-2 border-gray-200 cursor-pointer p-0">
@@ -4081,7 +4211,7 @@ HTML,
                 </div>
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-2">Accent</label>
+                <label class="cms-label">Accent</label>
                 <div class="flex items-center gap-2">
                     <input type="color" name="color_accent_dark" value="{{color_accent_dark}}"
                            class="w-10 h-10 rounded-lg border-2 border-gray-200 cursor-pointer p-0">
@@ -4090,7 +4220,7 @@ HTML,
                 </div>
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-2">Background</label>
+                <label class="cms-label">Background</label>
                 <div class="flex items-center gap-2">
                     <input type="color" name="color_background_dark" value="{{color_background_dark}}"
                            class="w-10 h-10 rounded-lg border-2 border-gray-200 cursor-pointer p-0">
@@ -4099,7 +4229,7 @@ HTML,
                 </div>
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-2">Text</label>
+                <label class="cms-label">Text</label>
                 <div class="flex items-center gap-2">
                     <input type="color" name="color_text_dark" value="{{color_text_dark}}"
                            class="w-10 h-10 rounded-lg border-2 border-gray-200 cursor-pointer p-0">
@@ -4111,15 +4241,15 @@ HTML,
     </div>
     
     <!-- Typography -->
-    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-6">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+    <div class="cms-card">
+        <h2 class="cms-card-header">
             <span class="material-symbols-outlined text-[#135bec]">text_fields</span>
             Typography
         </h2>
         <div class="max-w-md">
-            <label class="block text-sm font-medium text-gray-700 mb-1">Font Family</label>
+            <label class="cms-label">Font Family</label>
             <select name="font_family"
-                    class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                    class="cms-input">
                 <option value="system-ui, -apple-system, sans-serif" {{#if font_system}}selected{{/if}}>System Default</option>
                 <option value="'Inter', sans-serif" {{#if font_inter}}selected{{/if}}>Inter</option>
                 <option value="'Roboto', sans-serif" {{#if font_roboto}}selected{{/if}}>Roboto</option>
@@ -4130,14 +4260,14 @@ HTML,
     </div>
     
     <!-- Header & Footer -->
-    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-6">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+    <div class="cms-card">
+        <h2 class="cms-card-header">
             <span class="material-symbols-outlined text-[#135bec]">view_quilt</span>
             Header & Footer
         </h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-2">Header Background</label>
+                <label class="cms-label">Header Background</label>
                 <div class="flex items-center gap-2">
                     <input type="color" name="header_bg" value="{{header_bg}}"
                            class="w-10 h-10 rounded-lg border-2 border-gray-200 cursor-pointer p-0">
@@ -4146,71 +4276,168 @@ HTML,
                 </div>
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Footer Text</label>
+                <label class="cms-label">Footer Text</label>
                 <input type="text" name="footer_text" value="{{footer_text}}" placeholder="© 2026 Your Company"
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                       class="cms-input">
             </div>
         </div>
     </div>
     
     <!-- Custom Code -->
-    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-6">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+    <div class="cms-card">
+        <h2 class="cms-card-header">
             <span class="material-symbols-outlined text-[#135bec]">code</span>
             Custom Code
         </h2>
         <div class="space-y-4">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Custom Head Scripts</label>
+                <label class="cms-label">Custom Head Scripts</label>
                 <p class="text-xs text-gray-500 mb-2">Add analytics, fonts, or other scripts to the &lt;head&gt; section.</p>
                 <textarea name="head_scripts" rows="4"
-                          class="w-full px-3 py-2 font-mono text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">{{head_scripts}}</textarea>
+                          class="cms-input font-mono">{{head_scripts}}</textarea>
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Custom Footer Scripts</label>
+                <label class="cms-label">Custom Footer Scripts</label>
                 <p class="text-xs text-gray-500 mb-2">Add scripts before the closing &lt;/body&gt; tag.</p>
                 <textarea name="footer_scripts" rows="4"
-                          class="w-full px-3 py-2 font-mono text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">{{footer_scripts}}</textarea>
+                          class="cms-input font-mono">{{footer_scripts}}</textarea>
             </div>
         </div>
     </div>
     
-    <button type="submit" class="inline-flex items-center gap-2 px-6 py-2.5 bg-[#135bec] text-white font-medium rounded-lg hover:bg-[#0f4fd1] transition-colors">
+    <!-- Blog Settings -->
+    <div class="cms-card">
+        <h2 class="cms-card-header">
+            <span class="material-symbols-outlined text-[#135bec]">rss_feed</span>
+            Blog
+        </h2>
+        <div class="space-y-4">
+            <label class="flex items-center gap-3 cursor-pointer">
+                <input type="hidden" name="blog_enabled" value="0">
+                <input type="checkbox" name="blog_enabled" value="1" {{#if blog_enabled}}checked{{/if}}
+                       class="w-4 h-4 accent-[#135bec] cursor-pointer">
+                <span class="text-sm font-medium text-slate-700">Enable Blog</span>
+                <span class="text-xs text-slate-500">— publishes <code>/blog</code> routes and sidebar navigation</span>
+            </label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label class="cms-label">Blog Title</label>
+                    <input type="text" name="blog_title" value="{{blog_title}}" placeholder="Blog"
+                           class="cms-input">
+                </div>
+                <div>
+                    <label class="cms-label">Posts Per Page</label>
+                    <input type="number" name="blog_posts_per_page" value="{{blog_posts_per_page}}" min="1" max="100"
+                           class="cms-input">
+                </div>
+                <div class="md:col-span-2">
+                    <label class="cms-label">Blog Description</label>
+                    <input type="text" name="blog_description" value="{{blog_description}}" placeholder="Latest articles and updates"
+                           class="cms-input">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <button type="submit" class="cms-btn">
         <span class="material-symbols-outlined text-xl">save</span>
         Save Theme Settings
     </button>
 </form>
 HTML,
+
+            // ─── ADMIN: THEME KIT ────────────────────────────────────────
+            'admin/theme_kit' => <<<'HTML'
+<div class="mb-8 flex items-center justify-between">
+    <div>
+        <h1 class="text-2xl font-bold text-gray-900">Theme Kit</h1>
+        <p class="text-gray-600 mt-1">Pick a DaisyUI theme to apply site-wide.</p>
+    </div>
+    <a href="/admin/theme" class="btn btn-ghost btn-sm">← Color Settings</a>
+</div>
+
+{{#if flash_success}}
+<div class="cms-alert cms-alert-success">
+    <span class="material-symbols-outlined">check_circle</span>
+    <span>{{flash_success}}</span>
+</div>
+{{/if}}
+
+<div id="themeGrid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 mb-8"></div>
+
+<form method="post" action="/admin/theme/kit" id="themeKitForm">
+    {{{csrf_field}}}
+    <input type="hidden" name="ui_theme" id="selectedTheme" value="{{current_theme}}">
+    <button type="submit" class="btn btn-primary">Apply Selected Theme</button>
+</form>
+
+<script>
+(function(){
+    const themes = {{{themes_json}}};
+    const current = "{{current_theme}}";
+    const grid = document.getElementById("themeGrid");
+    const input = document.getElementById("selectedTheme");
+
+    themes.forEach(function(t) {
+        const card = document.createElement("div");
+        card.dataset.theme = t;
+        card.className = "cursor-pointer rounded-xl border-2 overflow-hidden transition-all hover:scale-105 " +
+            (t === current ? "border-primary shadow-lg ring-2 ring-primary/40" : "border-base-200");
+        card.innerHTML =
+            "<div data-theme=\"" + t + "\" class=\"p-3 flex flex-col gap-1.5 bg-base-100\">" +
+            "  <div class=\"flex gap-1\">" +
+            "    <span class=\"w-4 h-4 rounded-full bg-primary\"></span>" +
+            "    <span class=\"w-4 h-4 rounded-full bg-secondary\"></span>" +
+            "    <span class=\"w-4 h-4 rounded-full bg-accent\"></span>" +
+            "  </div>" +
+            "  <div class=\"bg-base-200 rounded h-8 flex items-center px-2 text-[10px] text-base-content font-medium\">Aa</div>" +
+            "  <div class=\"flex gap-1\">" +
+            "    <div class=\"btn btn-primary btn-xs flex-1\">btn</div>" +
+            "    <div class=\"btn btn-secondary btn-xs flex-1\">btn</div>" +
+            "  </div>" +
+            "</div>" +
+            "<div class=\"text-center text-xs py-1.5 font-medium bg-base-200 text-base-content capitalize\">" + t + "</div>";
+        card.addEventListener("click", function() {
+            document.querySelectorAll("#themeGrid > div").forEach(function(c){ c.classList.remove("border-primary","ring-2","ring-primary/40","shadow-lg"); c.classList.add("border-base-200"); });
+            card.classList.add("border-primary","ring-2","ring-primary/40","shadow-lg");
+            card.classList.remove("border-base-200");
+            input.value = t;
+        });
+        grid.appendChild(card);
+    });
+})();
+</script>
+HTML,
             
             // ─── ADMIN: USERS LIST ───────────────────────────────────────
             'admin/users' => <<<'HTML'
 <!-- Page Header -->
-<div class="mb-8 flex items-center justify-between">
+<div class="cms-page-header">
     <div>
-        <h1 class="text-2xl font-bold text-gray-900">Users</h1>
-        <p class="text-gray-600 mt-1">Manage user accounts and permissions.</p>
+        <h1 class="cms-page-title">Users</h1>
+        <p class="cms-page-subtitle">Manage user accounts and permissions.</p>
     </div>
-    <a href="/admin/users/new" class="inline-flex items-center gap-2 px-4 py-2.5 bg-[#135bec] text-white font-medium rounded-lg hover:bg-[#0f4fd1] transition-colors">
+    <a href="/admin/users/new" class="cms-btn">
         <span class="material-symbols-outlined text-xl">person_add</span>
         Add User
     </a>
 </div>
 
 {{#if flash_error}}
-<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-red-600">error</span>
-    <span class="text-red-800">{{flash_error}}</span>
+<div class="cms-alert cms-alert-error">
+    <span class="material-symbols-outlined">error</span>
+    <span>{{flash_error}}</span>
 </div>
 {{/if}}
 
 {{#if flash_success}}
-<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-green-600">check_circle</span>
-    <span class="text-green-800">{{flash_success}}</span>
+<div class="cms-alert cms-alert-success">
+    <span class="material-symbols-outlined">check_circle</span>
+    <span>{{flash_success}}</span>
 </div>
 {{/if}}
 
-<div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+<div class="cms-table-wrap">
     <div class="overflow-x-auto">
         <table class="w-full">
             <thead>
@@ -4235,27 +4462,27 @@ HTML,
                     </td>
                     <td class="px-6 py-4">
                         {{#if is_admin}}
-                        <span class="inline-flex items-center px-2.5 py-1 text-xs font-medium bg-red-100 text-red-800 rounded-full">Admin</span>
+                        <span class="cms-badge cms-badge-admin">Admin</span>
                         {{/if}}
                         {{#if is_editor}}
-                        <span class="inline-flex items-center px-2.5 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">Editor</span>
+                        <span class="cms-badge cms-badge-editor">Editor</span>
                         {{/if}}
                         {{#if is_viewer}}
-                        <span class="inline-flex items-center px-2.5 py-1 text-xs font-medium bg-gray-100 text-gray-800 rounded-full">Viewer</span>
+                        <span class="cms-badge cms-badge-viewer">Viewer</span>
                         {{/if}}
                     </td>
                     <td class="px-6 py-4 text-sm text-gray-500">{{created_at}}</td>
                     <td class="px-6 py-4 text-sm text-gray-500">{{last_login}}</td>
                     <td class="px-6 py-4">
                         <div class="flex items-center justify-end gap-2">
-                            <a href="/admin/users/{{id}}" class="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">
+                            <a href="/admin/users/{{id}}" class="cms-btn-action">
                                 <span class="material-symbols-outlined text-lg">edit</span>
                                 Edit
                             </a>
                             {{#if can_delete}}
                             <form method="post" action="/admin/users/{{id}}/delete" class="inline" data-confirm="Delete this user?">
                                 {{{csrf_field}}}
-                                <button type="submit" class="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 transition-colors">
+                                <button type="submit" class="cms-btn-danger">
                                     <span class="material-symbols-outlined text-lg">delete</span>
                                     Delete
                                 </button>
@@ -4274,8 +4501,9 @@ HTML,
             // ─── ADMIN: USER EDIT ────────────────────────────────────────
             'admin/user_edit' => <<<'HTML'
 <!-- Page Header -->
-<div class="mb-8 flex items-center gap-3">
-    <a href="/admin/users" class="text-gray-500 hover:text-gray-700">
+<div class="cms-page-header mb-8">
+    <div class="flex items-center gap-3">
+    <a href="/admin/users" class="cms-back">
         <span class="material-symbols-outlined">arrow_back</span>
     </a>
     <div>
@@ -4285,30 +4513,30 @@ HTML,
 </div>
 
 {{#if flash_error}}
-<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-red-600">error</span>
-    <span class="text-red-800">{{flash_error}}</span>
+<div class="cms-alert cms-alert-error">
+    <span class="material-symbols-outlined">error</span>
+    <span>{{flash_error}}</span>
 </div>
 {{/if}}
 
 <form method="post" action="/admin/users/{{id}}">
     {{{csrf_field}}}
     
-    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-6">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+    <div class="cms-card">
+        <h2 class="cms-card-header">
             <span class="material-symbols-outlined text-[#135bec]">person</span>
             Account Details
         </h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Email *</label>
+                <label class="cms-label">Email *</label>
                 <input type="email" name="email" value="{{email}}" required
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                       class="cms-input">
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Role *</label>
+                <label class="cms-label">Role *</label>
                 <select name="role"
-                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                        class="cms-input">
                     <option value="admin" {{#if is_admin}}selected{{/if}}>Admin - Full access</option>
                     <option value="editor" {{#if is_editor}}selected{{/if}}>Editor - Manage content</option>
                     <option value="viewer" {{#if is_viewer}}selected{{/if}}>Viewer - Read only</option>
@@ -4317,33 +4545,33 @@ HTML,
         </div>
     </div>
     
-    <div class="bg-white rounded-xl border border-gray-200 p-6 mb-6">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+    <div class="cms-card">
+        <h2 class="cms-card-header">
             <span class="material-symbols-outlined text-[#135bec]">lock</span>
             Password
         </h2>
-        <p class="text-sm text-gray-600 mb-4">{{#if is_new}}Set a strong password.{{else}}Leave blank to keep the current password.{{/if}}</p>
+        <p class="text-sm text-slate-500 mb-4">{{#if is_new}}Set a strong password.{{else}}Leave blank to keep the current password.{{/if}}</p>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">{{#if is_new}}Password *{{else}}New Password{{/if}}</label>
+                <label class="cms-label">{{#if is_new}}Password *{{else}}New Password{{/if}}</label>
                 <input type="password" name="password" minlength="12" {{#if is_new}}required{{/if}}
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
-                <p class="text-xs text-gray-500 mt-1">Minimum 12 characters</p>
+                       class="cms-input">
+                <p class="cms-hint">Minimum 12 characters</p>
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Confirm Password</label>
+                <label class="cms-label">Confirm Password</label>
                 <input type="password" name="password_confirm"
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                       class="cms-input">
             </div>
         </div>
     </div>
     
     <div class="flex items-center gap-3">
-        <button type="submit" class="inline-flex items-center gap-2 px-6 py-2.5 bg-[#135bec] text-white font-medium rounded-lg hover:bg-[#0f4fd1] transition-colors">
+        <button type="submit" class="cms-btn">
             <span class="material-symbols-outlined text-xl">save</span>
             {{#if is_new}}Create User{{else}}Save Changes{{/if}}
         </button>
-        <a href="/admin/users" class="inline-flex items-center gap-2 px-4 py-2.5 bg-gray-100 text-gray-700 font-medium rounded-lg hover:bg-gray-200 transition-colors">
+        <a href="/admin/users" class="cms-btn-ghost">
             Cancel
         </a>
     </div>
@@ -4352,22 +4580,24 @@ HTML,
 
             'admin_ai' => <<<'HTML'
 <!-- Page Header -->
-<div class="mb-8">
-    <h1 class="text-2xl font-bold text-gray-900">AI Site Generator</h1>
-    <p class="text-gray-600 mt-1">Let AI create a complete website for you based on your business information.</p>
+<div class="cms-page-header">
+    <div>
+        <h1 class="cms-page-title">AI Site Generator</h1>
+        <p class="cms-page-subtitle">Let AI create a complete website for you based on your business information.</p>
+    </div>
 </div>
 
 {{#if flash_error}}
-<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-red-600">error</span>
-    <span class="text-red-800">{{flash_error}}</span>
+<div class="cms-alert cms-alert-error">
+    <span class="material-symbols-outlined">error</span>
+    <span>{{flash_error}}</span>
 </div>
 {{/if}}
 
 {{#if flash_success}}
-<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-green-600">check_circle</span>
-    <span class="text-green-800">{{flash_success}}</span>
+<div class="cms-alert cms-alert-success">
+    <span class="material-symbols-outlined">check_circle</span>
+    <span>{{flash_success}}</span>
 </div>
 {{/if}}
 
@@ -4393,9 +4623,9 @@ HTML,
         
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">AI Provider</label>
+                <label class="cms-label">AI Provider</label>
                 <select name="ai_provider" required 
-                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                        class="cms-input">
                     <option value="openai" {{#if current_provider_openai}}selected{{/if}}>OpenAI (GPT-5.2)</option>
                     <option value="anthropic" {{#if current_provider_anthropic}}selected{{/if}}>Anthropic (Claude 4.5)</option>
                     <option value="google" {{#if current_provider_google}}selected{{/if}}>Google (Gemini 3)</option>
@@ -4403,24 +4633,24 @@ HTML,
             </div>
             
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+                <label class="cms-label">API Key</label>
                 <input type="password" name="ai_api_key" required 
                        placeholder="Enter new API key to change"
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                       class="cms-input">
             </div>
             
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Model (optional)</label>
+                <label class="cms-label">Model (optional)</label>
                 <input type="text" name="ai_model" value="{{current_model}}"
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                       class="cms-input">
             </div>
         </div>
         
         <div class="flex gap-2">
-            <button type="submit" class="px-4 py-2 bg-[#135bec] text-white font-medium rounded-lg hover:bg-[#0f4fd1] transition-colors">
+            <button type="submit" class="cms-btn">
                 Update Configuration
             </button>
-            <button type="button" id="hide-config-btn" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+            <button type="button" id="hide-config-btn" class="cms-btn-ghost cms-btn-sm">
                 Cancel
             </button>
         </div>
@@ -4442,24 +4672,24 @@ document.getElementById('hide-config-btn')?.addEventListener('click', function()
     {{{csrf_field}}}
     
     <!-- Business Information -->
-    <div class="bg-white rounded-xl border border-gray-200 p-6">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+    <div class="cms-card">
+        <h2 class="cms-card-header">
             <span class="material-symbols-outlined text-[#135bec]">business</span>
             Business Information
         </h2>
         
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Business Name *</label>
+                <label class="cms-label">Business Name *</label>
                 <input type="text" name="business_name" required 
                        placeholder="e.g., Acme Consulting"
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                       class="cms-input">
             </div>
             
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Industry *</label>
+                <label class="cms-label">Industry *</label>
                 <select name="industry" required 
-                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                        class="cms-input">
                     <option value="">Select an industry...</option>
                     {{#each industries}}
                     <option value="{{this}}">{{this}}</option>
@@ -4469,25 +4699,25 @@ document.getElementById('hide-config-btn')?.addEventListener('click', function()
         </div>
         
         <div class="mt-4">
-            <label class="block text-sm font-medium text-gray-700 mb-1">Business Description *</label>
+            <label class="cms-label">Business Description *</label>
             <textarea name="description" rows="4" required 
                       placeholder="Describe your business, services, products, target audience, and what makes you unique..."
-                      class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none resize-none"></textarea>
+                      class="cms-input"></textarea>
         </div>
     </div>
     
     <!-- Style Preferences -->
-    <div class="bg-white rounded-xl border border-gray-200 p-6">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+    <div class="cms-card">
+        <h2 class="cms-card-header">
             <span class="material-symbols-outlined text-[#135bec]">palette</span>
             Style Preferences
         </h2>
         
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Tone</label>
+                <label class="cms-label">Tone</label>
                 <select name="tone" 
-                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                        class="cms-input">
                     {{#each tones}}
                     <option value="{{@key}}">{{@key}} - {{this}}</option>
                     {{/each}}
@@ -4495,16 +4725,16 @@ document.getElementById('hide-config-btn')?.addEventListener('click', function()
             </div>
             
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Color Preference</label>
+                <label class="cms-label">Color Preference</label>
                 <input type="text" name="color_preference" 
                        placeholder="e.g., Blue and green, Modern dark theme"
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                       class="cms-input">
             </div>
             
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">UI Theme</label>
+                <label class="cms-label">UI Theme</label>
                 <select name="ui_theme" 
-                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                        class="cms-input">
                     <optgroup label="Light Themes">
                         <option value="light">Light - Clean & minimal</option>
                         <option value="cupcake">Cupcake - Soft & pastel</option>
@@ -4538,14 +4768,14 @@ document.getElementById('hide-config-btn')?.addEventListener('click', function()
                         <option value="coffee">Coffee - Warm brown</option>
                     </optgroup>
                 </select>
-                <p class="text-xs text-gray-500 mt-1">Choose a pre-built theme or let colors be auto-generated</p>
+                <p class="cms-hint">Choose a pre-built theme or let colors be auto-generated</p>
             </div>
         </div>
     </div>
     
     <!-- Features -->
-    <div class="bg-white rounded-xl border border-gray-200 p-6">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+    <div class="cms-card">
+        <h2 class="cms-card-header">
             <span class="material-symbols-outlined text-[#135bec]">widgets</span>
             Features to Include
         </h2>
@@ -4562,25 +4792,25 @@ document.getElementById('hide-config-btn')?.addEventListener('click', function()
     </div>
     
     <!-- Additional Information -->
-    <div class="bg-white rounded-xl border border-gray-200 p-6">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+    <div class="cms-card">
+        <h2 class="cms-card-header">
             <span class="material-symbols-outlined text-[#135bec]">info</span>
             Additional Information
         </h2>
         
         <div class="space-y-4">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Specific Pages Needed</label>
+                <label class="cms-label">Specific Pages Needed</label>
                 <input type="text" name="pages_needed" 
                        placeholder="e.g., Home, About, Services, Portfolio, Contact"
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                       class="cms-input">
             </div>
             
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Your Content</label>
+                <label class="cms-label">Your Content</label>
                 <textarea name="user_content" rows="5" 
                           placeholder="Paste any existing content, mission statement, service descriptions, or text you want included..."
-                          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none resize-none"></textarea>
+                          class="cms-input"></textarea>
             </div>
         </div>
     </div>
@@ -4588,87 +4818,218 @@ document.getElementById('hide-config-btn')?.addEventListener('click', function()
     <!-- Actions -->
     <div class="flex items-center gap-3">
         <button type="submit" id="ai-generate-btn"
-                class="inline-flex items-center gap-2 px-6 py-2.5 bg-[#135bec] text-white font-medium rounded-lg hover:bg-[#0f4fd1] transition-colors">
+                class="cms-btn">
             <span class="material-symbols-outlined text-xl">auto_awesome</span>
             Generate Site Plan
         </button>
         <a href="/admin" 
-           class="px-4 py-2.5 text-gray-700 font-medium rounded-lg border border-gray-300 hover:bg-gray-50 transition-colors">
+           class="cms-btn-ghost">
             Cancel
         </a>
     </div>
 </form>
 
-<!-- AI Loading Modal -->
+<!-- AI Streaming Progress Modal -->
 <div id="ai-loading-modal" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
-    <div class="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full mx-4 text-center">
-        <div class="relative w-20 h-20 mx-auto mb-6">
-            <!-- Spinning circle -->
-            <svg class="animate-spin w-20 h-20" viewBox="0 0 50 50">
-                <circle class="opacity-20" cx="25" cy="25" r="20" stroke="#135bec" stroke-width="4" fill="none"/>
-                <circle class="opacity-100" cx="25" cy="25" r="20" stroke="#135bec" stroke-width="4" fill="none" 
-                        stroke-linecap="round" stroke-dasharray="80, 200" stroke-dashoffset="0"/>
-            </svg>
-            <!-- AI icon in center -->
-            <div class="absolute inset-0 flex items-center justify-center">
-                <span class="material-symbols-outlined text-3xl text-[#135bec] animate-pulse">auto_awesome</span>
+    <div class="bg-white rounded-2xl shadow-2xl p-8 max-w-lg w-full mx-4">
+        <div class="text-center mb-6">
+            <div class="relative w-16 h-16 mx-auto mb-4">
+                <svg class="animate-spin w-16 h-16" viewBox="0 0 50 50">
+                    <circle class="opacity-20" cx="25" cy="25" r="20" stroke="#135bec" stroke-width="4" fill="none"/>
+                    <circle cx="25" cy="25" r="20" stroke="#135bec" stroke-width="4" fill="none"
+                            stroke-linecap="round" stroke-dasharray="80, 200" stroke-dashoffset="0"/>
+                </svg>
+                <div class="absolute inset-0 flex items-center justify-center">
+                    <span class="material-symbols-outlined text-2xl text-[#135bec] animate-pulse">auto_awesome</span>
+                </div>
+            </div>
+            <h3 class="text-xl font-bold text-gray-900">Building Your Website</h3>
+            <p class="text-sm text-gray-500 mt-1">AI is working in multiple passes for best results</p>
+        </div>
+
+        <!-- Stage progress -->
+        <div class="space-y-3">
+            <div id="stage-1" class="flex items-center gap-3 p-3 rounded-lg bg-gray-50 transition-colors">
+                <span id="stage-1-icon" class="material-symbols-outlined text-gray-400 text-xl w-6 text-center">radio_button_unchecked</span>
+                <div class="flex-1 min-w-0">
+                    <p class="text-sm font-medium text-gray-700">Site Structure</p>
+                    <p class="text-xs text-gray-500">Planning pages, colors &amp; navigation</p>
+                </div>
+            </div>
+            <div id="stage-2" class="flex items-center gap-3 p-3 rounded-lg bg-gray-50 transition-colors">
+                <span id="stage-2-icon" class="material-symbols-outlined text-gray-400 text-xl w-6 text-center">radio_button_unchecked</span>
+                <div class="flex-1 min-w-0">
+                    <p class="text-sm font-medium text-gray-700">Page Content</p>
+                    <p id="stage-2-detail" class="text-xs text-gray-500">Writing content for each page</p>
+                </div>
+            </div>
+            <div id="stage-3" class="flex items-center gap-3 p-3 rounded-lg bg-gray-50 transition-colors">
+                <span id="stage-3-icon" class="material-symbols-outlined text-gray-400 text-xl w-6 text-center">radio_button_unchecked</span>
+                <div class="flex-1 min-w-0">
+                    <p class="text-sm font-medium text-gray-700">Final Assembly</p>
+                    <p class="text-xs text-gray-500">Putting it all together</p>
+                </div>
             </div>
         </div>
-        <h3 class="text-xl font-bold text-gray-900 mb-2">Generating Your Website</h3>
-        <p class="text-gray-600 mb-4">AI is creating your site plan with pages, content, and design...</p>
-        <div class="space-y-2 text-sm text-gray-500">
-            <p id="ai-status-text" class="flex items-center justify-center gap-2">
-                <span class="w-2 h-2 bg-[#135bec] rounded-full animate-pulse"></span>
-                Analyzing your business information...
-            </p>
-        </div>
-        <p class="text-xs text-gray-400 mt-6">This may take 15-30 seconds</p>
+
+        <!-- Status line -->
+        <p id="ai-status-text" class="text-xs text-center text-gray-400 mt-5 flex items-center justify-center gap-2">
+            <span class="w-1.5 h-1.5 bg-[#135bec] rounded-full animate-pulse inline-block"></span>
+            Starting generation...
+        </p>
+
+        <!-- Error state (hidden by default) -->
+        <div id="ai-error-box" class="hidden mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700"></div>
     </div>
 </div>
 
+<!-- Hidden form to POST completed plan to approvals -->
+<form id="ai-plan-form" method="post" action="/admin/approvals" class="hidden">
+    {{{csrf_field}}}
+    <input type="hidden" name="plan_json" id="ai-plan-json">
+</form>
+
 <script nonce="{{csp_nonce}}">
 (function() {
-    const form = document.getElementById('ai-generate-form');
-    const modal = document.getElementById('ai-loading-modal');
-    const statusText = document.getElementById('ai-status-text');
-    const btn = document.getElementById('ai-generate-btn');
-    
-    const statusMessages = [
-        'Analyzing your business information...',
-        'Selecting optimal color palette...',
-        'Designing page layouts...',
-        'Writing compelling content...',
-        'Creating navigation structure...',
-        'Optimizing for conversions...',
-        'Finalizing site plan...'
-    ];
-    
-    let messageIndex = 0;
-    let statusInterval;
-    
-    form?.addEventListener('submit', function(e) {
-        // Show modal
+    const form    = document.getElementById('ai-generate-form');
+    const modal   = document.getElementById('ai-loading-modal');
+    const btn     = document.getElementById('ai-generate-btn');
+    const statusEl = document.getElementById('ai-status-text');
+    const errorBox = document.getElementById('ai-error-box');
+    const planForm = document.getElementById('ai-plan-form');
+    const planJson = document.getElementById('ai-plan-json');
+
+    function setStatus(msg) {
+        if (statusEl) statusEl.innerHTML = '<span class="w-1.5 h-1.5 bg-[#135bec] rounded-full animate-pulse inline-block"></span> ' + msg;
+    }
+
+    function setStageActive(n) {
+        const el = document.getElementById('stage-' + n);
+        const icon = document.getElementById('stage-' + n + '-icon');
+        if (el) el.classList.replace('bg-gray-50', 'bg-blue-50');
+        if (icon) {
+            icon.textContent = 'pending';
+            icon.classList.replace('text-gray-400', 'text-[#135bec]');
+            icon.classList.add('animate-pulse');
+        }
+    }
+
+    function setStageComplete(n) {
+        const el = document.getElementById('stage-' + n);
+        const icon = document.getElementById('stage-' + n + '-icon');
+        if (el) { el.classList.replace('bg-blue-50', 'bg-green-50'); }
+        if (icon) {
+            icon.textContent = 'check_circle';
+            icon.classList.replace('text-[#135bec]', 'text-green-500');
+            icon.classList.remove('animate-pulse');
+        }
+    }
+
+    function showError(msg) {
+        if (errorBox) { errorBox.textContent = msg; errorBox.classList.remove('hidden'); }
+        setStatus('Generation failed.');
+        btn.disabled = false;
+        btn.innerHTML = '<span class="material-symbols-outlined text-xl">auto_awesome</span> Generate Site Plan';
+    }
+
+    function parseSseChunk(text) {
+        // Returns array of {event, data} objects
+        const results = [];
+        const lines = text.split('\n');
+        let event = 'message', data = '';
+        for (const line of lines) {
+            if (line.startsWith('event:')) { event = line.slice(6).trim(); }
+            else if (line.startsWith('data:')) { data = line.slice(5).trim(); }
+            else if (line === '' && data) {
+                results.push({ event, data });
+                event = 'message'; data = '';
+            }
+        }
+        return results;
+    }
+
+    form?.addEventListener('submit', async function(e) {
+        e.preventDefault();
+
         modal?.classList.remove('hidden');
         btn.disabled = true;
         btn.innerHTML = '<span class="material-symbols-outlined text-xl animate-spin">progress_activity</span> Generating...';
-        
-        // Rotate status messages
-        statusInterval = setInterval(() => {
-            messageIndex = (messageIndex + 1) % statusMessages.length;
-            if (statusText) {
-                statusText.innerHTML = '<span class="w-2 h-2 bg-[#135bec] rounded-full animate-pulse"></span> ' + statusMessages[messageIndex];
+        if (errorBox) errorBox.classList.add('hidden');
+
+        // Collect form data as JSON
+        const fd = new FormData(form);
+        const payload = {};
+        fd.forEach((v, k) => {
+            if (k.endsWith('[]')) {
+                const key = k.slice(0, -2);
+                if (!payload[key]) payload[key] = [];
+                payload[key].push(v);
+            } else {
+                payload[k] = v;
             }
-        }, 3000);
-    });
-    
-    // Clean up on page unload
-    window.addEventListener('beforeunload', () => {
-        if (statusInterval) clearInterval(statusInterval);
+        });
+
+        let buffer = '';
+        try {
+            const res = await fetch('/api/ai/stream', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!res.ok) {
+                const err = await res.text();
+                showError('Server error: ' + res.status + ' ' + err.slice(0, 200));
+                return;
+            }
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const events = parseSseChunk(buffer);
+                // Keep only the incomplete last chunk in buffer
+                const lastNewline = buffer.lastIndexOf('\n\n');
+                if (lastNewline >= 0) buffer = buffer.slice(lastNewline + 2);
+
+                for (const { event, data } of events) {
+                    let payload;
+                    try { payload = JSON.parse(data); } catch { payload = { message: data }; }
+
+                    if (event === 'stage') {
+                        const n = payload.stage;
+                        setStageActive(n);
+                        setStatus(payload.message || payload.label || 'Stage ' + n + '...');
+                        if (n === 2 && payload.page) {
+                            const d = document.getElementById('stage-2-detail');
+                            if (d) d.textContent = 'Writing: ' + payload.page;
+                        }
+                    } else if (event === 'stage_complete') {
+                        setStageComplete(payload.stage);
+                    } else if (event === 'complete') {
+                        setStageComplete(1);
+                        setStageComplete(2);
+                        setStageComplete(3);
+                        setStatus('Done! Redirecting to approval queue...');
+                        planJson.value = JSON.stringify(payload.plan || payload);
+                        setTimeout(() => planForm.submit(), 600);
+                    } else if (event === 'error') {
+                        showError(payload.message || 'Unknown error during generation.');
+                        return;
+                    }
+                }
+            }
+        } catch (err) {
+            showError('Connection error: ' + err.message);
+        }
     });
 })();
 </script>
 {{else}}
-<div class="bg-white rounded-xl border border-gray-200 p-6">
+<div class="cms-card">
     <div class="p-4 bg-amber-50 border border-amber-200 rounded-lg mb-6">
         <div class="flex items-start gap-3">
             <span class="material-symbols-outlined text-amber-600">warning</span>
@@ -4683,9 +5044,9 @@ document.getElementById('hide-config-btn')?.addEventListener('click', function()
         {{{csrf_field}}}
         
         <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">AI Provider *</label>
+            <label class="cms-label">AI Provider *</label>
             <select name="ai_provider" required 
-                    class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
+                    class="cms-input">
                 <option value="">Select a provider...</option>
                 <option value="openai" {{#if current_provider_openai}}selected{{/if}}>OpenAI (GPT-5.2, GPT-4.1)</option>
                 <option value="anthropic" {{#if current_provider_anthropic}}selected{{/if}}>Anthropic (Claude 4.5)</option>
@@ -4694,11 +5055,11 @@ document.getElementById('hide-config-btn')?.addEventListener('click', function()
         </div>
         
         <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">API Key *</label>
+            <label class="cms-label">API Key *</label>
             <input type="password" name="ai_api_key" required 
                    placeholder="{{#if has_api_key}}••••••••••••••••{{else}}Enter your API key{{/if}}"
-                   class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
-            <p class="text-xs text-gray-500 mt-1">
+                   class="cms-input">
+            <p class="cms-hint">
                 Get your API key from 
                 <a href="https://platform.openai.com/api-keys" target="_blank" class="text-[#135bec] hover:underline">OpenAI</a>, 
                 <a href="https://console.anthropic.com/" target="_blank" class="text-[#135bec] hover:underline">Anthropic</a>, or 
@@ -4707,18 +5068,18 @@ document.getElementById('hide-config-btn')?.addEventListener('click', function()
         </div>
         
         <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Model (optional)</label>
+            <label class="cms-label">Model (optional)</label>
             <input type="text" name="ai_model" value="{{current_model}}"
                    placeholder="gpt-5.2 (default for OpenAI)"
-                   class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none">
-            <p class="text-xs text-gray-500 mt-1">
+                   class="cms-input">
+            <p class="cms-hint">
                 OpenAI: gpt-5.2, gpt-5-mini, gpt-4.1 | Anthropic: claude-sonnet-4-5, claude-opus-4-5 | Google: gemini-3-flash-preview, gemini-3-pro-preview
             </p>
         </div>
         
         <div class="pt-4 border-t border-gray-200">
             <button type="submit" 
-                    class="inline-flex items-center gap-2 px-6 py-2.5 bg-[#135bec] text-white font-medium rounded-lg hover:bg-[#0f4fd1] transition-colors">
+                    class="cms-btn">
                 <span class="material-symbols-outlined text-xl">save</span>
                 Save Configuration
             </button>
@@ -4736,22 +5097,22 @@ HTML,
 </div>
 
 {{#if flash_error}}
-<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-red-600">error</span>
-    <span class="text-red-800">{{flash_error}}</span>
+<div class="cms-alert cms-alert-error">
+    <span class="material-symbols-outlined">error</span>
+    <span>{{flash_error}}</span>
 </div>
 {{/if}}
 
 {{#if flash_success}}
-<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-green-600">check_circle</span>
-    <span class="text-green-800">{{flash_success}}</span>
+<div class="cms-alert cms-alert-success">
+    <span class="material-symbols-outlined">check_circle</span>
+    <span>{{flash_success}}</span>
 </div>
 {{/if}}
 
 <div class="grid grid-cols-1 gap-6">
     <!-- Pending Approval -->
-    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+    <div class="cms-table-wrap">
         <div class="p-4 border-b border-gray-200 bg-amber-50">
             <h2 class="font-semibold text-gray-900 flex items-center gap-2">
                 <span class="material-symbols-outlined text-amber-600">pending</span>
@@ -4791,7 +5152,7 @@ HTML,
     </div>
     
     <!-- Approved -->
-    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+    <div class="cms-table-wrap">
         <div class="p-4 border-b border-gray-200 bg-green-50">
             <h2 class="font-semibold text-gray-900 flex items-center gap-2">
                 <span class="material-symbols-outlined text-green-600">check_circle</span>
@@ -4836,7 +5197,7 @@ HTML,
     </div>
     
     <!-- Applied -->
-    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+    <div class="cms-table-wrap">
         <div class="p-4 border-b border-gray-200 bg-blue-50">
             <h2 class="font-semibold text-gray-900 flex items-center gap-2">
                 <span class="material-symbols-outlined text-blue-600">rocket_launch</span>
@@ -4898,7 +5259,7 @@ HTML,
     </div>
     <div class="flex items-center gap-2">
         <a href="/admin/approvals/{{item.id}}/preview" 
-           class="inline-flex items-center gap-2 px-4 py-2 bg-purple-600 text-white font-medium rounded-lg hover:bg-purple-700 transition-colors">
+           class="inline-flex items-center gap-2 px-4 py-2 bg-[#135bec] text-white font-medium rounded-lg hover:bg-[#0f4fd1] transition-colors">
             <span class="material-symbols-outlined text-xl">preview</span>
             Preview & Edit
         </a>
@@ -4934,16 +5295,16 @@ HTML,
 </div>
 
 {{#if flash_error}}
-<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-red-600">error</span>
-    <span class="text-red-800">{{flash_error}}</span>
+<div class="cms-alert cms-alert-error">
+    <span class="material-symbols-outlined">error</span>
+    <span>{{flash_error}}</span>
 </div>
 {{/if}}
 
 {{#if flash_success}}
-<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3">
-    <span class="material-symbols-outlined text-green-600">check_circle</span>
-    <span class="text-green-800">{{flash_success}}</span>
+<div class="cms-alert cms-alert-success">
+    <span class="material-symbols-outlined">check_circle</span>
+    <span>{{flash_success}}</span>
 </div>
 {{/if}}
 
@@ -4951,8 +5312,8 @@ HTML,
     <!-- Left Column: Overview -->
     <div class="lg:col-span-2 space-y-6">
         <!-- Site Overview -->
-        <div class="bg-white rounded-xl border border-gray-200 p-6">
-            <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+        <div class="cms-card">
+            <h2 class="cms-card-header">
                 <span class="material-symbols-outlined text-[#135bec]">info</span>
                 Site Overview
             </h2>
@@ -4969,8 +5330,8 @@ HTML,
         </div>
         
         <!-- Navigation -->
-        <div class="bg-white rounded-xl border border-gray-200 p-6">
-            <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+        <div class="cms-card">
+            <h2 class="cms-card-header">
                 <span class="material-symbols-outlined text-[#135bec]">menu</span>
                 Navigation
             </h2>
@@ -4985,8 +5346,8 @@ HTML,
         </div>
         
         <!-- Pages -->
-        <div class="bg-white rounded-xl border border-gray-200 p-6">
-            <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+        <div class="cms-card">
+            <h2 class="cms-card-header">
                 <span class="material-symbols-outlined text-[#135bec]">description</span>
                 Pages ({{pages_count}})
             </h2>
@@ -5019,8 +5380,8 @@ HTML,
         
         <!-- Footer -->
         {{#if plan.footer}}
-        <div class="bg-white rounded-xl border border-gray-200 p-6">
-            <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+        <div class="cms-card">
+            <h2 class="cms-card-header">
                 <span class="material-symbols-outlined text-[#135bec]">bottom_navigation</span>
                 Footer
             </h2>
@@ -5033,8 +5394,8 @@ HTML,
     <div class="space-y-6">
         <!-- Color Scheme -->
         {{#if plan.colors}}
-        <div class="bg-white rounded-xl border border-gray-200 p-6">
-            <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+        <div class="cms-card">
+            <h2 class="cms-card-header">
                 <span class="material-symbols-outlined text-[#135bec]">palette</span>
                 Color Scheme
             </h2>
@@ -5079,7 +5440,7 @@ HTML,
         {{/if}}
         
         <!-- Raw JSON -->
-        <details class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <details class="cms-table-wrap">
             <summary class="p-4 cursor-pointer hover:bg-gray-50 flex items-center gap-2 font-medium text-gray-900">
                 <span class="material-symbols-outlined text-gray-500">code</span>
                 Raw JSON
@@ -5180,11 +5541,6 @@ HTML,
             </ul>
         </div>
         <div class="navbar-end gap-2">
-            <label class="swap swap-rotate btn btn-ghost btn-circle text-base-content" title="Toggle dark mode">
-                <input type="checkbox" id="theme-toggle" class="theme-controller" />
-                <svg class="swap-off fill-current w-6 h-6" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5.64,17l-.71.71a1,1,0,0,0,0,1.41,1,1,0,0,0,1.41,0l.71-.71A1,1,0,0,0,5.64,17ZM5,12a1,1,0,0,0-1-1H3a1,1,0,0,0,0,2H4A1,1,0,0,0,5,12Zm7-7a1,1,0,0,0,1-1V3a1,1,0,0,0-2,0V4A1,1,0,0,0,12,5ZM5.64,7.05a1,1,0,0,0,.7.29,1,1,0,0,0,.71-.29,1,1,0,0,0,0-1.41l-.71-.71A1,1,0,0,0,4.93,6.34Zm12,.29a1,1,0,0,0,.7-.29l.71-.71a1,1,0,1,0-1.41-1.41L17,5.64a1,1,0,0,0,0,1.41A1,1,0,0,0,17.66,7.34ZM21,11H20a1,1,0,0,0,0,2h1a1,1,0,0,0,0-2Zm-9,8a1,1,0,0,0-1,1v1a1,1,0,0,0,2,0V20A1,1,0,0,0,12,19ZM18.36,17A1,1,0,0,0,17,18.36l.71.71a1,1,0,0,0,1.41,0,1,1,0,0,0,0-1.41ZM12,6.5A5.5,5.5,0,1,0,17.5,12,5.51,5.51,0,0,0,12,6.5Zm0,9A3.5,3.5,0,1,1,15.5,12,3.5,3.5,0,0,1,12,15.5Z"/></svg>
-                <svg class="swap-on fill-current w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21.64,13a1,1,0,0,0-1.05-.14,8.05,8.05,0,0,1-3.37.73A8.15,8.15,0,0,1,9.08,5.49a8.59,8.59,0,0,1,.25-2A1,1,0,0,0,8,2.36,10.14,10.14,0,1,0,22,14.05,1,1,0,0,0,21.64,13Z"/></svg>
-            </label>
             <a href="#" class="btn btn-primary btn-sm">Contact</a>
         </div>
     </div>
@@ -6088,6 +6444,769 @@ HTML,
 </body>
 </html>
 HTML,
+
+            // ─── AI CHAT WIZARD ──────────────────────────────────────────────
+            'admin_ai_chat' => <<<'HTML'
+<div class="max-w-3xl mx-auto">
+    <div class="mb-6 flex items-center justify-between">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900 flex items-center gap-2">
+                <span class="material-symbols-outlined text-[#135bec]">forum</span>
+                AI Chat Wizard
+            </h1>
+            <p class="text-gray-500 text-sm mt-1">Describe your business in your own words — AI will ask questions and build your site.</p>
+        </div>
+        <div class="flex gap-2">
+            <a href="/admin/ai" class="px-3 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 flex items-center gap-1">
+                <span class="material-symbols-outlined text-sm">auto_awesome</span> Form Mode
+            </a>
+            <button id="reset-btn" class="px-3 py-2 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50 flex items-center gap-1">
+                <span class="material-symbols-outlined text-sm">refresh</span> Start Over
+            </button>
+        </div>
+    </div>
+
+    {{#if is_configured}}
+    <!-- Chat Window -->
+    <div class="bg-white rounded-2xl border border-gray-200 flex flex-col" style="height: 60vh; min-height: 420px;">
+        <div class="flex-1 overflow-y-auto p-6 space-y-4" id="chat-messages">
+            {{#if history}}
+            {{#each history}}
+            <div class="flex {{#if (eq role 'user')}}justify-end{{else}}justify-start{{/if}}">
+                <div class="max-w-[80%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap
+                    {{#if (eq role 'user')}}bg-[#135bec] text-white rounded-br-sm{{else}}bg-gray-100 text-gray-800 rounded-bl-sm{{/if}}">
+                    {{content}}
+                </div>
+            </div>
+            {{/each}}
+            {{else}}
+            <div class="flex justify-start">
+                <div class="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-bl-sm bg-gray-100 text-gray-800 text-sm leading-relaxed">
+                    👋 Hi! I'm your AI web design assistant. Tell me about your business — what do you do, who are your customers, and what kind of website do you need?
+                </div>
+            </div>
+            {{/if}}
+            <div id="typing-indicator" class="hidden flex justify-start">
+                <div class="px-4 py-3 rounded-2xl rounded-bl-sm bg-gray-100 text-gray-400 text-sm flex gap-1 items-center">
+                    <span class="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style="animation-delay:0ms"></span>
+                    <span class="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style="animation-delay:150ms"></span>
+                    <span class="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style="animation-delay:300ms"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Input area -->
+        <div class="border-t border-gray-100 p-4">
+            <div class="flex gap-3 items-end">
+                <textarea id="message-input" rows="2"
+                    placeholder="Describe your business, answer questions..."
+                    class="flex-1 px-3 py-2 border border-gray-300 rounded-xl resize-none text-sm focus:ring-2 focus:ring-[#135bec] focus:border-[#135bec] outline-none"></textarea>
+                <button id="send-btn"
+                    class="px-4 py-2 bg-[#135bec] text-white rounded-xl hover:bg-[#0f4fd1] transition-colors flex items-center gap-1 text-sm font-medium self-end">
+                    <span class="material-symbols-outlined text-sm">send</span>
+                    Send
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Generate CTA (shown when AI is ready) -->
+    <div id="generate-cta" class="hidden mt-4 bg-green-50 border border-green-200 rounded-xl p-5 flex items-center justify-between gap-4">
+        <div>
+            <p class="font-semibold text-green-800">✅ Ready to build your website!</p>
+            <p class="text-sm text-green-700 mt-0.5">AI has gathered enough information. Click to generate your full site.</p>
+        </div>
+        <button id="generate-btn"
+            class="px-5 py-2.5 bg-[#135bec] text-white rounded-xl font-medium text-sm hover:bg-[#0f4fd1] transition-colors flex items-center gap-2 shrink-0">
+            <span class="material-symbols-outlined text-sm">rocket_launch</span>
+            Generate My Site
+        </button>
+    </div>
+
+    {{else}}
+    <div class="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center">
+        <span class="material-symbols-outlined text-amber-500 text-4xl">warning</span>
+        <p class="font-semibold text-amber-800 mt-2">AI Not Configured</p>
+        <p class="text-sm text-amber-700 mt-1 mb-4">Set up your AI API key to use the chat wizard.</p>
+        <a href="/admin/ai" class="inline-flex items-center gap-2 px-4 py-2 bg-amber-600 text-white rounded-lg text-sm hover:bg-amber-700">
+            <span class="material-symbols-outlined text-sm">settings</span>Configure AI
+        </a>
+    </div>
+    {{/if}}
+</div>
+
+<!-- SSE Generation Modal (reused from AI form) -->
+<div id="ai-loading-modal" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
+    <div class="bg-white rounded-2xl shadow-2xl p-8 max-w-lg w-full mx-4">
+        <div class="text-center mb-6">
+            <div class="relative w-16 h-16 mx-auto mb-4">
+                <svg class="animate-spin w-16 h-16" viewBox="0 0 50 50">
+                    <circle class="opacity-20" cx="25" cy="25" r="20" stroke="#135bec" stroke-width="4" fill="none"/>
+                    <circle cx="25" cy="25" r="20" stroke="#135bec" stroke-width="4" fill="none" stroke-linecap="round" stroke-dasharray="80, 200" stroke-dashoffset="0"/>
+                </svg>
+                <div class="absolute inset-0 flex items-center justify-center">
+                    <span class="material-symbols-outlined text-2xl text-[#135bec] animate-pulse">auto_awesome</span>
+                </div>
+            </div>
+            <h3 class="text-xl font-bold text-gray-900">Building Your Website</h3>
+            <p class="text-sm text-gray-500 mt-1">Working in multiple passes for best results</p>
+        </div>
+        <div class="space-y-3">
+            <div id="stage-1" class="flex items-center gap-3 p-3 rounded-lg bg-gray-50">
+                <span id="stage-1-icon" class="material-symbols-outlined text-gray-400 text-xl w-6 text-center">radio_button_unchecked</span>
+                <div><p class="text-sm font-medium text-gray-700">Site Structure</p><p class="text-xs text-gray-500">Planning pages &amp; colors</p></div>
+            </div>
+            <div id="stage-2" class="flex items-center gap-3 p-3 rounded-lg bg-gray-50">
+                <span id="stage-2-icon" class="material-symbols-outlined text-gray-400 text-xl w-6 text-center">radio_button_unchecked</span>
+                <div><p class="text-sm font-medium text-gray-700">Page Content</p><p id="stage-2-detail" class="text-xs text-gray-500">Writing content for each page</p></div>
+            </div>
+            <div id="stage-3" class="flex items-center gap-3 p-3 rounded-lg bg-gray-50">
+                <span id="stage-3-icon" class="material-symbols-outlined text-gray-400 text-xl w-6 text-center">radio_button_unchecked</span>
+                <div><p class="text-sm font-medium text-gray-700">Final Assembly</p><p class="text-xs text-gray-500">Putting it all together</p></div>
+            </div>
+        </div>
+        <p id="ai-status-text" class="text-xs text-center text-gray-400 mt-5"></p>
+        <div id="ai-error-box" class="hidden mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700"></div>
+    </div>
+</div>
+<form id="ai-plan-form" method="post" action="/admin/approvals" class="hidden">
+    <input type="hidden" name="_csrf" value="{{csrf_token}}">
+    <input type="hidden" name="plan_json" id="ai-plan-json">
+</form>
+
+<script nonce="{{csp_nonce}}">
+(function() {
+    const CSRF = '{{csrf_token}}';
+    const messagesEl = document.getElementById('chat-messages');
+    const inputEl    = document.getElementById('message-input');
+    const sendBtn    = document.getElementById('send-btn');
+    const typing     = document.getElementById('typing-indicator');
+    const ctaEl      = document.getElementById('generate-cta');
+    const genBtn     = document.getElementById('generate-btn');
+    const resetBtn   = document.getElementById('reset-btn');
+    const modal      = document.getElementById('ai-loading-modal');
+    const statusEl   = document.getElementById('ai-status-text');
+    const errorBox   = document.getElementById('ai-error-box');
+    const planForm   = document.getElementById('ai-plan-form');
+    const planJson   = document.getElementById('ai-plan-json');
+
+    let currentBrief = null;
+
+    function scrollBottom() { if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight; }
+    scrollBottom();
+
+    function appendMessage(role, content) {
+        if (typing) typing.classList.add('hidden');
+        const wrap = document.createElement('div');
+        wrap.className = 'flex ' + (role === 'user' ? 'justify-end' : 'justify-start');
+        wrap.innerHTML = `<div class="max-w-[80%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap ${
+            role === 'user'
+                ? 'bg-[#135bec] text-white rounded-br-sm'
+                : 'bg-gray-100 text-gray-800 rounded-bl-sm'
+        }">${escapeHtml(content)}</div>`;
+        messagesEl.appendChild(wrap);
+        scrollBottom();
+    }
+
+    function escapeHtml(s) {
+        return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    async function sendMessage() {
+        const msg = inputEl.value.trim();
+        if (!msg) return;
+        inputEl.value = '';
+        appendMessage('user', msg);
+        sendBtn.disabled = true;
+        if (typing) typing.classList.remove('hidden');
+        scrollBottom();
+
+        try {
+            const res = await fetch('/api/ai/chat', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+                body: JSON.stringify({message: msg, _csrf: CSRF})
+            });
+            const data = await res.json();
+            if (data.error) { appendMessage('assistant', '⚠️ ' + data.error); return; }
+            appendMessage('assistant', data.reply);
+            if (data.ready && data.brief) {
+                currentBrief = data.brief;
+                ctaEl?.classList.remove('hidden');
+            }
+        } catch(e) {
+            appendMessage('assistant', '⚠️ Connection error: ' + e.message);
+        } finally {
+            sendBtn.disabled = false;
+        }
+    }
+
+    sendBtn?.addEventListener('click', sendMessage);
+    inputEl?.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    });
+
+    resetBtn?.addEventListener('click', async () => {
+        await fetch('/api/ai/chat/reset', {method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}});
+        location.reload();
+    });
+
+    // SSE generation helpers
+    function setStatus(msg) { if (statusEl) statusEl.textContent = msg; }
+    function setStageActive(n) {
+        const el = document.getElementById('stage-' + n);
+        const ic = document.getElementById('stage-' + n + '-icon');
+        el?.classList.replace('bg-gray-50','bg-blue-50');
+        if (ic) { ic.textContent='pending'; ic.classList.replace('text-gray-400','text-[#135bec]'); ic.classList.add('animate-pulse'); }
+    }
+    function setStageComplete(n) {
+        const el = document.getElementById('stage-' + n);
+        const ic = document.getElementById('stage-' + n + '-icon');
+        el?.classList.replace('bg-blue-50','bg-green-50');
+        if (ic) { ic.textContent='check_circle'; ic.classList.replace('text-[#135bec]','text-green-500'); ic.classList.remove('animate-pulse'); }
+    }
+    function parseSse(text) {
+        const out=[]; const lines=text.split('\n'); let ev='message',da='';
+        for (const l of lines) {
+            if (l.startsWith('event:')) ev=l.slice(6).trim();
+            else if (l.startsWith('data:')) da=l.slice(5).trim();
+            else if (l===''&&da) { out.push({event:ev,data:da}); ev='message';da=''; }
+        }
+        return out;
+    }
+
+    genBtn?.addEventListener('click', async () => {
+        if (!currentBrief) return;
+        modal?.classList.remove('hidden');
+        ctaEl?.classList.add('hidden');
+        if (errorBox) errorBox.classList.add('hidden');
+
+        let buffer='';
+        try {
+            const res = await fetch('/api/ai/stream', {
+                method:'POST',
+                headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+                body: JSON.stringify(currentBrief)
+            });
+            if (!res.ok) { if(errorBox){errorBox.textContent='Server error '+res.status; errorBox.classList.remove('hidden');} return; }
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+            while (true) {
+                const {value, done} = await reader.read();
+                if (done) break;
+                buffer += dec.decode(value, {stream:true});
+                const events = parseSse(buffer);
+                const last = buffer.lastIndexOf('\n\n');
+                if (last>=0) buffer=buffer.slice(last+2);
+                for (const {event, data} of events) {
+                    let p; try { p=JSON.parse(data); } catch { p={message:data}; }
+                    if (event==='stage') { setStageActive(p.stage); setStatus(p.message||p.label||''); if (p.stage===2&&p.page) { const d=document.getElementById('stage-2-detail'); if(d) d.textContent='Writing: '+p.page; } }
+                    else if (event==='stage_complete') setStageComplete(p.stage);
+                    else if (event==='complete') { setStageComplete(1);setStageComplete(2);setStageComplete(3); setStatus('Done! Redirecting...'); planJson.value=JSON.stringify(p.plan||p); setTimeout(()=>planForm.submit(),600); }
+                    else if (event==='error') { if(errorBox){errorBox.textContent=p.message||'Error';errorBox.classList.remove('hidden');} return; }
+                }
+            }
+        } catch(e) { if(errorBox){errorBox.textContent='Connection error: '+e.message;errorBox.classList.remove('hidden');} }
+    });
+})();
+</script>
+HTML,
+
+            // ─── BLOG PUBLIC TEMPLATES ───────────────────────────────────────
+            'blog_index' => <<<'HTML'
+<!DOCTYPE html>
+<html lang="en" data-theme="{{ui_theme}}">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{blog_title}} — {{site_name}}</title>
+    <meta name="description" content="{{blog_description}}">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+{{{nav_html}}}
+<main class="max-w-5xl mx-auto px-4 py-12">
+    <div class="mb-10">
+        <h1 class="text-4xl font-bold">{{blog_title}}</h1>
+        <p class="text-base-content/60 mt-2">{{blog_description}}</p>
+    </div>
+    {{#if posts}}
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+        {{#each posts}}
+        <article class="bg-base-100 rounded-2xl border border-base-300 overflow-hidden hover:shadow-lg transition-shadow">
+            {{#if cover_url}}
+            <a href="/blog/{{slug}}"><img src="{{cover_url}}" alt="{{title}}" class="w-full h-48 object-cover"></a>
+            {{/if}}
+            <div class="p-5">
+                {{#if category_name}}
+                <a href="/blog/category/{{category_slug}}" class="text-xs font-semibold text-primary uppercase tracking-wide">{{category_name}}</a>
+                {{/if}}
+                <h2 class="text-xl font-bold mt-2 mb-2"><a href="/blog/{{slug}}" class="hover:text-primary transition-colors">{{title}}</a></h2>
+                <p class="text-base-content/70 text-sm line-clamp-3">{{excerpt}}</p>
+                <div class="flex items-center gap-3 mt-4 text-xs text-base-content/50">
+                    <span>{{author_name}}</span>
+                    <span>·</span>
+                    <span>{{published_at_fmt}}</span>
+                </div>
+            </div>
+        </article>
+        {{/each}}
+    </div>
+    {{#if has_pagination}}
+    <div class="flex justify-center gap-2 mt-12">
+        {{#if prev_page}}<a href="/blog?page={{prev_page}}" class="btn btn-outline btn-sm">← Previous</a>{{/if}}
+        <span class="btn btn-ghost btn-sm cursor-default">Page {{current_page}} of {{total_pages}}</span>
+        {{#if next_page}}<a href="/blog?page={{next_page}}" class="btn btn-outline btn-sm">Next →</a>{{/if}}
+    </div>
+    {{/if}}
+    {{else}}
+    <div class="text-center py-20 text-base-content/50">
+        <span class="material-symbols-outlined text-5xl">article</span>
+        <p class="mt-4 text-lg">No posts published yet.</p>
+    </div>
+    {{/if}}
+</main>
+{{{footer_html}}}
+</body></html>
+HTML,
+
+            'blog_post' => <<<'HTML'
+<!DOCTYPE html>
+<html lang="en" data-theme="{{ui_theme}}">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{post_title}} — {{site_name}}</title>
+    <meta name="description" content="{{meta_description}}">
+    {{#if og_image_url}}<meta property="og:image" content="{{og_image_url}}">{{/if}}
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2/dist/quill.snow.css">
+    <style>
+        .ql-editor { padding: 0; }
+        .prose img { max-width: 100%; border-radius: 0.75rem; }
+    </style>
+</head>
+<body>
+{{{nav_html}}}
+<article class="max-w-3xl mx-auto px-4 py-12">
+    {{#if category_name}}
+    <a href="/blog/category/{{category_slug}}" class="text-primary text-sm font-semibold uppercase tracking-wide">{{category_name}}</a>
+    {{/if}}
+    <h1 class="text-4xl font-bold mt-3 mb-4">{{post_title}}</h1>
+    <div class="flex items-center gap-4 text-sm text-base-content/60 mb-8">
+        <span class="font-medium text-base-content">{{author_name}}</span>
+        <span>·</span>
+        <span>{{published_at_fmt}}</span>
+        {{#if tags}}
+        <span>·</span>
+        <div class="flex gap-2 flex-wrap">
+            {{#each tags}}<a href="/blog/tag/{{slug}}" class="badge badge-ghost badge-sm">{{name}}</a>{{/each}}
+        </div>
+        {{/if}}
+    </div>
+    {{#if cover_url}}
+    <img src="{{cover_url}}" alt="{{post_title}}" class="w-full rounded-2xl mb-10 max-h-96 object-cover">
+    {{/if}}
+    <div class="prose prose-lg max-w-none">{{{body_html}}}</div>
+    <div class="mt-12 pt-8 border-t border-base-300 flex justify-between">
+        {{#if prev_post}}<a href="/blog/{{prev_post.slug}}" class="flex items-center gap-2 text-sm hover:text-primary">← {{prev_post.title}}</a>{{else}}<span></span>{{/if}}
+        {{#if next_post}}<a href="/blog/{{next_post.slug}}" class="flex items-center gap-2 text-sm hover:text-primary">{{next_post.title}} →</a>{{else}}<span></span>{{/if}}
+    </div>
+</article>
+{{{footer_html}}}
+</body></html>
+HTML,
+
+            // ─── BLOG ADMIN TEMPLATES ────────────────────────────────────────
+            'admin/blog_posts' => <<<'HTML'
+<div class="cms-page-header">
+    <div>
+        <h1 class="cms-page-title">Blog Posts</h1>
+        <p class="cms-page-subtitle">{{total_posts}} post(s) total</p>
+    </div>
+    <a href="/admin/blog/posts/new" class="cms-btn">
+        <span class="material-symbols-outlined text-sm">add</span>New Post
+    </a>
+</div>
+
+<div class="cms-filter-tabs">
+    <a href="/admin/blog/posts" class="cms-filter-tab {{#if filter_all}}active{{/if}}">All</a>
+    <a href="/admin/blog/posts?status=published" class="cms-filter-tab {{#if filter_published}}active{{/if}}">Published</a>
+    <a href="/admin/blog/posts?status=draft" class="cms-filter-tab {{#if filter_draft}}active{{/if}}">Drafts</a>
+</div>
+
+<div class="cms-table-wrap">
+    {{#if posts}}
+    <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b border-gray-200">
+            <tr>
+                <th class="text-left px-4 py-3 font-medium text-gray-600">Title</th>
+                <th class="text-left px-4 py-3 font-medium text-gray-600 hidden md:table-cell">Category</th>
+                <th class="text-left px-4 py-3 font-medium text-gray-600">Status</th>
+                <th class="text-left px-4 py-3 font-medium text-gray-600 hidden md:table-cell">Date</th>
+                <th class="px-4 py-3"></th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {{#each posts}}
+            <tr class="hover:bg-gray-50 transition-colors">
+                <td class="px-4 py-3">
+                    <div class="font-medium text-gray-900">{{title}}</div>
+                    <div class="text-xs text-gray-400">/blog/{{slug}}</div>
+                </td>
+                <td class="px-4 py-3 text-gray-500 hidden md:table-cell">{{category_name}}</td>
+                <td class="px-4 py-3">
+                    <span class="cms-badge {{#if (eq status 'published')}}cms-badge-published{{else}}{{#if (eq status 'archived')}}cms-badge-archived{{else}}cms-badge-draft{{/if}}{{/if}}">{{status}}</span>
+                </td>
+                <td class="px-4 py-3 text-gray-500 hidden md:table-cell">{{published_at_fmt}}</td>
+                <td class="px-4 py-3">
+                    <div class="flex items-center gap-2 justify-end">
+                        <a href="/admin/blog/posts/{{id}}/edit" class="p-1.5 text-gray-500 hover:text-[#135bec] hover:bg-blue-50 rounded" title="Edit">
+                            <span class="material-symbols-outlined text-[18px]">edit</span>
+                        </a>
+                        {{#if (eq status 'published')}}
+                        <form method="post" action="/admin/blog/posts/{{id}}/unpublish" class="inline">
+                            {{{../csrf_field}}}
+                            <button class="p-1.5 text-gray-500 hover:text-amber-600 hover:bg-amber-50 rounded" title="Unpublish">
+                                <span class="material-symbols-outlined text-[18px]">visibility_off</span>
+                            </button>
+                        </form>
+                        {{else}}
+                        <form method="post" action="/admin/blog/posts/{{id}}/publish" class="inline">
+                            {{{../csrf_field}}}
+                            <button class="p-1.5 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded" title="Publish">
+                                <span class="material-symbols-outlined text-[18px]">publish</span>
+                            </button>
+                        </form>
+                        {{/if}}
+                        <form method="post" action="/admin/blog/posts/{{id}}/delete" class="inline" data-confirm="Delete this post permanently?">
+                            {{{../csrf_field}}}
+                            <button class="p-1.5 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded" title="Delete">
+                                <span class="material-symbols-outlined text-[18px]">delete</span>
+                            </button>
+                        </form>
+                    </div>
+                </td>
+            </tr>
+            {{/each}}
+        </tbody>
+    </table>
+    {{else}}
+    <div class="text-center py-16 text-gray-400">
+        <span class="material-symbols-outlined text-5xl">article</span>
+        <p class="mt-3">No posts yet. <a href="/admin/blog/posts/new" class="text-[#135bec] hover:underline">Create your first post →</a></p>
+    </div>
+    {{/if}}
+</div>
+HTML,
+
+            'admin/blog_post_edit' => <<<'HTML'
+<div class="mb-6 flex items-center gap-3">
+    <a href="/admin/blog/posts" class="cms-back">
+        <span class="material-symbols-outlined">arrow_back</span>
+    </a>
+    <div>
+        <h1 class="text-2xl font-bold text-gray-900">{{#if post_id}}Edit Post{{else}}New Post{{/if}}</h1>
+    </div>
+</div>
+
+<form method="post" action="/admin/blog/posts/save" class="space-y-6" id="post-form">
+    {{{csrf_field}}}
+    {{#if post_id}}<input type="hidden" name="post_id" value="{{post_id}}">{{/if}}
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- Main content -->
+        <div class="lg:col-span-2 space-y-4">
+            <div class="cms-card">
+                <input type="text" name="title" value="{{post_title}}" required
+                    placeholder="Post Title"
+                    class="w-full text-2xl font-bold border-none outline-none focus:ring-0 placeholder-slate-300">
+                <div class="mt-2 flex items-center gap-2 text-sm text-gray-400">
+                    <span>/blog/</span>
+                    <input type="text" name="slug" id="slug-input" value="{{post_slug}}"
+                        class="flex-1 border-b border-dashed border-gray-300 outline-none focus:border-[#135bec] text-gray-600 bg-transparent">
+                </div>
+            </div>
+
+            <div class="cms-card">
+                <label class="cms-label">Excerpt</label>
+                <textarea name="excerpt" rows="2" placeholder="Brief summary shown in listing..."
+                    class="cms-input">{{post_excerpt}}</textarea>
+            </div>
+
+            <div class="cms-card">
+                <label class="block text-sm font-medium text-gray-700 mb-3">Body Content</label>
+                <div id="quill-editor" style="min-height: 400px;">{{{post_body}}}</div>
+                <input type="hidden" name="body_html" id="body-html-input">
+            </div>
+        </div>
+
+        <!-- Sidebar -->
+        <div class="space-y-4">
+            <!-- Publish box -->
+            <div class="cms-card">
+                <h3 class="font-semibold text-gray-800 mb-3">Publish</h3>
+                <div class="space-y-3">
+                    <div>
+                        <label class="cms-label-sm">Status</label>
+                        <select name="status" class="cms-input">
+                            <option value="draft" {{#if status_draft}}selected{{/if}}>Draft</option>
+                            <option value="published" {{#if status_published}}selected{{/if}}>Published</option>
+                            <option value="archived" {{#if status_archived}}selected{{/if}}>Archived</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="cms-label-sm">Publish Date</label>
+                        <input type="datetime-local" name="published_at" value="{{published_at_input}}"
+                            class="cms-input">
+                    </div>
+                </div>
+                <div class="mt-4 flex gap-2">
+                    <button type="submit" class="cms-btn flex-1">Save</button>
+                    <a href="/admin/blog/posts" class="cms-btn-ghost cms-btn-sm">Cancel</a>
+                </div>
+            </div>
+
+            <!-- Category -->
+            <div class="cms-card">
+                <h3 class="font-semibold text-gray-800 mb-3">Category</h3>
+                <select name="category_id" class="cms-input">
+                    <option value="">Uncategorized</option>
+                    {{#each categories}}
+                    <option value="{{id}}" {{#if selected}}selected{{/if}}>{{name}}</option>
+                    {{/each}}
+                </select>
+            </div>
+
+            <!-- Tags -->
+            <div class="cms-card">
+                <h3 class="font-semibold text-gray-800 mb-3">Tags</h3>
+                <div class="flex flex-wrap gap-2 mb-3" id="selected-tags">
+                    {{#each post_tags}}
+                    <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-700 rounded-full text-xs">
+                        {{name}}
+                        <button type="button" class="hover:text-red-500" data-remove-tag="{{id}}">×</button>
+                        <input type="hidden" name="tags[]" value="{{id}}">
+                    </span>
+                    {{/each}}
+                </div>
+                <div class="flex gap-2">
+                    <select id="tag-select" class="flex-1 px-2 py-1.5 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-[#135bec] outline-none">
+                        <option value="">Add tag...</option>
+                        {{#each all_tags}}
+                        <option value="{{id}}" data-name="{{name}}">{{name}}</option>
+                        {{/each}}
+                    </select>
+                </div>
+                <div class="mt-2 flex gap-1">
+                    <input id="new-tag-input" type="text" placeholder="New tag name" class="flex-1 px-2 py-1.5 border border-gray-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-[#135bec]">
+                    <button type="button" id="add-tag-btn" class="px-2 py-1.5 bg-gray-100 hover:bg-gray-200 rounded-lg text-xs">Add</button>
+                </div>
+            </div>
+
+            <!-- Cover Image -->
+            <div class="cms-card">
+                <h3 class="font-semibold text-gray-800 mb-3">Cover Image</h3>
+                {{#if cover_url}}
+                <img src="{{cover_url}}" class="w-full rounded-lg mb-2 max-h-32 object-cover" id="cover-preview">
+                {{else}}
+                <div id="cover-preview" class="hidden w-full rounded-lg mb-2 max-h-32 object-cover bg-gray-100"></div>
+                {{/if}}
+                <input type="hidden" name="cover_asset_id" id="cover-asset-id" value="{{cover_asset_id}}">
+                <button type="button" id="pick-cover-btn" class="w-full px-3 py-2 border-2 border-dashed border-gray-300 rounded-lg text-sm text-gray-500 hover:border-[#135bec] hover:text-[#135bec] transition-colors">
+                    <span class="material-symbols-outlined text-sm align-middle">image</span>
+                    {{#if cover_url}}Change Image{{else}}Pick Cover Image{{/if}}
+                </button>
+            </div>
+
+            <!-- SEO -->
+            <div class="cms-card">
+                <h3 class="font-semibold text-gray-800 mb-3">SEO</h3>
+                <textarea name="meta_description" rows="3" placeholder="Meta description..."
+                    class="w-full px-3 py-2 border border-gray-200 rounded-lg text-xs resize-none focus:ring-2 focus:ring-[#135bec] outline-none">{{meta_description}}</textarea>
+            </div>
+        </div>
+    </div>
+</form>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2/dist/quill.snow.css">
+<script src="https://cdn.jsdelivr.net/npm/quill@2/dist/quill.js"></script>
+<script nonce="{{csp_nonce}}">
+(function() {
+    // Auto-slug from title
+    const titleInput = document.querySelector('input[name="title"]');
+    const slugInput  = document.getElementById('slug-input');
+    if (titleInput && slugInput && !slugInput.value) {
+        titleInput.addEventListener('input', () => {
+            slugInput.value = titleInput.value.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+        });
+    }
+
+    // Quill editor
+    const quill = new Quill('#quill-editor', {
+        theme: 'snow',
+        modules: { toolbar: [
+            [{ header: [1,2,3,false] }],
+            ['bold','italic','underline','strike'],
+            ['blockquote','code-block'],
+            [{ list:'ordered'},{ list:'bullet'}],
+            ['link','image'],
+            ['clean']
+        ]}
+    });
+
+    document.getElementById('post-form')?.addEventListener('submit', () => {
+        document.getElementById('body-html-input').value = quill.root.innerHTML;
+    });
+
+    // Tag management
+    const tagSelect = document.getElementById('tag-select');
+    const selectedTags = document.getElementById('selected-tags');
+    const newTagInput = document.getElementById('new-tag-input');
+    const addTagBtn = document.getElementById('add-tag-btn');
+    const existingIds = new Set([...document.querySelectorAll('input[name="tags[]"]')].map(i=>i.value));
+
+    function addTagEl(id, name) {
+        if (existingIds.has(String(id))) return;
+        existingIds.add(String(id));
+        const span = document.createElement('span');
+        span.className = 'inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-700 rounded-full text-xs';
+        span.innerHTML = `${name}<button type="button" class="hover:text-red-500" data-remove-tag="${id}">×</button><input type="hidden" name="tags[]" value="${id}">`;
+        selectedTags?.appendChild(span);
+    }
+
+    tagSelect?.addEventListener('change', () => {
+        const opt = tagSelect.options[tagSelect.selectedIndex];
+        if (opt.value) { addTagEl(opt.value, opt.dataset.name); tagSelect.selectedIndex=0; }
+    });
+
+    addTagBtn?.addEventListener('click', async () => {
+        const name = newTagInput.value.trim();
+        if (!name) return;
+        const res = await fetch('/api/blog/tags', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+        const d = await res.json();
+        if (d.id) { addTagEl(d.id, d.name); newTagInput.value=''; }
+    });
+
+    selectedTags?.addEventListener('click', e => {
+        const btn = e.target.closest('[data-remove-tag]');
+        if (btn) { const id=btn.dataset.removeTag; existingIds.delete(id); btn.closest('span')?.remove(); }
+    });
+
+    // Cover media picker
+    document.getElementById('pick-cover-btn')?.addEventListener('click', () => {
+        fetch('/api/media').then(r=>r.json()).then(data => {
+            const items = data.assets||data||[];
+            const dialog = document.createElement('dialog');
+            dialog.className='modal modal-open'; dialog.innerHTML=`
+            <div class="modal-box max-w-2xl"><h3 class="font-bold mb-4">Pick Cover Image</h3>
+            <div class="grid grid-cols-3 gap-3 max-h-80 overflow-y-auto">${items.filter(a=>a.type?.startsWith('image')).map(a=>`
+                <button type="button" class="rounded overflow-hidden border-2 border-transparent hover:border-[#135bec] transition-colors" data-id="${a.id}" data-url="${a.url}">
+                    <img src="${a.url}" class="w-full h-24 object-cover">
+                </button>`).join('')||'<p class="col-span-3 text-center text-gray-400 py-8">No images yet</p>'}
+            </div><div class="mt-4"><button class="btn btn-ghost btn-sm" onclick="this.closest(\'dialog\').remove()">Cancel</button></div></div>`;
+            dialog.addEventListener('click', e => {
+                const btn = e.target.closest('[data-id]');
+                if (btn) {
+                    document.getElementById('cover-asset-id').value=btn.dataset.id;
+                    const prev=document.getElementById('cover-preview');
+                    if(prev){prev.src=btn.dataset.url;prev.classList.remove('hidden');}
+                    dialog.remove();
+                }
+            });
+            document.body.appendChild(dialog);
+        });
+    });
+})();
+</script>
+HTML,
+
+            'admin/blog_categories' => <<<'HTML'
+<div class="cms-page-header">
+    <div>
+        <h1 class="cms-page-title">Blog Categories</h1>
+        <p class="cms-page-subtitle">Organize your blog posts into categories.</p>
+    </div>
+</div>
+
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <!-- Category list -->
+    <div class="cms-table-wrap">
+        <div class="px-5 py-3 border-b border-gray-100 font-medium text-sm text-gray-700">All Categories</div>
+        {{#if categories}}
+        <table class="w-full text-sm">
+            <tbody class="divide-y divide-gray-100">
+                {{#each categories}}
+                <tr class="hover:bg-gray-50">
+                    <td class="px-5 py-3">
+                        <div class="font-medium text-gray-800">{{name}}</div>
+                        <div class="text-xs text-gray-400">/blog/category/{{slug}}</div>
+                    </td>
+                    <td class="px-5 py-3 text-gray-400 text-right">{{post_count}} posts</td>
+                    <td class="px-3 py-3">
+                        <div class="flex gap-1 justify-end">
+                            <button type="button" class="p-1.5 text-gray-400 hover:text-[#135bec] hover:bg-blue-50 rounded edit-cat-btn"
+                                data-id="{{id}}" data-name="{{name}}" data-desc="{{description}}" title="Edit">
+                                <span class="material-symbols-outlined text-[16px]">edit</span>
+                            </button>
+                            <form method="post" action="/admin/blog/categories/{{id}}/delete" data-confirm="Delete this category?">
+                                {{{../csrf_field}}}
+                                <button type="submit" class="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded" title="Delete">
+                                    <span class="material-symbols-outlined text-[16px]">delete</span>
+                                </button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {{/each}}
+            </tbody>
+        </table>
+        {{else}}
+        <div class="text-center py-10 text-gray-400 text-sm">No categories yet.</div>
+        {{/if}}
+    </div>
+
+    <!-- Add / Edit form -->
+    <div class="cms-card">
+        <h2 class="font-semibold text-gray-800 mb-4" id="cat-form-title">Add Category</h2>
+        <form method="post" action="/admin/blog/categories/save" class="space-y-3">
+            {{{csrf_field}}}
+            <input type="hidden" name="cat_id" id="cat-id-input" value="">
+            <div>
+                <label class="cms-label-sm">Name *</label>
+                <input type="text" name="cat_name" id="cat-name-input" required
+                    class="cms-input">
+            </div>
+            <div>
+                <label class="cms-label-sm">Description</label>
+                <textarea name="cat_description" id="cat-desc-input" rows="2" resize-none
+                    class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-[#135bec] outline-none resize-none"></textarea>
+            </div>
+            <div class="flex gap-2">
+                <button type="submit" class="cms-btn">Save</button>
+                <button type="button" id="cat-clear-btn" class="cms-btn-ghost cms-btn-sm">Clear</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script nonce="{{csp_nonce}}">
+document.querySelectorAll('.edit-cat-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.getElementById('cat-id-input').value = btn.dataset.id;
+        document.getElementById('cat-name-input').value = btn.dataset.name;
+        document.getElementById('cat-desc-input').value = btn.dataset.desc;
+        document.getElementById('cat-form-title').textContent = 'Edit Category';
+    });
+});
+document.getElementById('cat-clear-btn')?.addEventListener('click', () => {
+    document.getElementById('cat-id-input').value='';
+    document.getElementById('cat-name-input').value='';
+    document.getElementById('cat-desc-input').value='';
+    document.getElementById('cat-form-title').textContent='Add Category';
+});
+</script>
+HTML,
         ];
         
         return $templates[$name] ?? '';
@@ -6101,6 +7220,8 @@ HTML,
 class Cache {
     // ─── PAGE CACHE ──────────────────────────────────────────────────────────
     public static function getPage(string $slug): ?string {
+        // Always bypass cache in dev mode or for logged-in editors
+        if (ONECMS_DEV || Auth::check()) return null;
         $file = ONECMS_CACHE . '/pages/' . md5($slug) . '.html';
         if (file_exists($file) && filemtime($file) > time() - 3600) {
             return file_get_contents($file);
@@ -6109,6 +7230,8 @@ class Cache {
     }
     
     public static function setPage(string $slug, string $html): void {
+        // Skip writing cache in dev mode
+        if (ONECMS_DEV) return;
         $file = ONECMS_CACHE . '/pages/' . md5($slug) . '.html';
         file_put_contents($file, $html);
     }
@@ -6552,15 +7675,6 @@ class CSSGenerator {
             'shadow_md' => '0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)',
             'shadow_lg' => '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)',
             'shadow_xl' => '0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)',
-            // Dark mode variants
-            'color_primary_dark' => '#60a5fa',
-            'color_secondary_dark' => '#3b82f6',
-            'color_accent_dark' => '#fbbf24',
-            'color_background_dark' => '#0f172a',
-            'color_background_secondary_dark' => '#1e293b',
-            'color_text_dark' => '#f1f5f9',
-            'color_text_muted_dark' => '#94a3b8',
-            'color_border_dark' => '#334155',
         ];
         
         // Merge with stored values
@@ -6571,7 +7685,7 @@ class CSSGenerator {
         }
         
         $css = <<<CSS
-/* Light Mode (default) */
+/* Site Theme */
 :root {
     --color-primary: {$vars['color_primary']};
     --color-secondary: {$vars['color_secondary']};
@@ -6590,24 +7704,6 @@ class CSSGenerator {
     --shadow-md: {$vars['shadow_md']};
     --shadow-lg: {$vars['shadow_lg']};
     --shadow-xl: {$vars['shadow_xl']};
-    color-scheme: light dark;
-}
-
-/* Dark Mode */
-@media (prefers-color-scheme: dark) {
-    :root {
-        --color-primary: {$vars['color_primary_dark']};
-        --color-secondary: {$vars['color_secondary_dark']};
-        --color-accent: {$vars['color_accent_dark']};
-        --color-background: {$vars['color_background_dark']};
-        --color-background-secondary: {$vars['color_background_secondary_dark']};
-        --color-text: {$vars['color_text_dark']};
-        --color-text-muted: {$vars['color_text_muted_dark']};
-        --color-border: {$vars['color_border_dark']};
-        --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.2);
-        --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.3);
-        --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.3);
-    }
 }
 
 /* Reset */
@@ -7302,11 +8398,7 @@ details.faq-item[open] .faq-question::after { content: '−'; }
 .flash-error { background: #fee2e2; color: #991b1b; }
 .flash-info { background: #dbeafe; color: #1e40af; }
 
-@media (prefers-color-scheme: dark) {
-    .flash-success { background: #065f46; color: #d1fae5; }
-    .flash-error { background: #991b1b; color: #fee2e2; }
-    .flash-info { background: #1e40af; color: #dbeafe; }
-}
+
 
 /* Editor Bar (for logged-in editors) */
 .onecms-edit-bar {
@@ -7391,8 +8483,20 @@ CSS;
     
     public static function cacheAndGetHash(): string {
         $css = self::generate();
+        // Append custom CSS from settings (admin-controlled)
+        $customCss = Settings::get('custom_css', '');
+        if (!empty($customCss)) {
+            $css .= "\n/* Custom CSS */\n" . $customCss;
+        }
+
+        // In dev mode always regenerate; never read from stale cache
+        if (ONECMS_DEV) {
+            $file = ONECMS_CACHE . '/assets/app.dev.css';
+            file_put_contents($file, $css);
+            return 'app.dev';
+        }
+
         $hash = 'app.' . substr(md5($css), 0, 12);
-        
         $file = ONECMS_CACHE . '/assets/' . $hash . '.css';
         if (!file_exists($file)) {
             // Clear old CSS files
@@ -7401,7 +8505,6 @@ CSS;
             }
             file_put_contents($file, $css);
         }
-        
         return $hash;
     }
 }
@@ -7774,6 +8877,11 @@ class AdminController {
             'is_nav' => false,
             'is_media' => false,
             'is_theme' => false,
+            'is_theme_kit' => false,
+            'is_blog'      => false,
+            'is_blog_cats' => false,
+            'blog_enabled' => Settings::get('blog_enabled', '0') === '1',
+            'is_ai_chat'   => false,
             'is_users' => false,
             'is_ai' => false,
             'is_approvals' => false,
@@ -8354,11 +9462,6 @@ class AdminController {
             'color_accent' => '#f59e0b',
             'color_background' => '#ffffff',
             'color_text' => '#1f2937',
-            'color_primary_dark' => '#60a5fa',
-            'color_secondary_dark' => '#3b82f6',
-            'color_accent_dark' => '#fbbf24',
-            'color_background_dark' => '#0f172a',
-            'color_text_dark' => '#f1f5f9',
             'font_family' => 'system-ui, -apple-system, sans-serif',
             'header_bg' => '#3b82f6',
             'footer_text' => '',
@@ -8370,6 +9473,10 @@ class AdminController {
             'site_name' => Settings::get('site_name', ''),
             'tagline' => Settings::get('tagline', ''),
             'logo_url' => Settings::get('logo_url', ''),
+            'blog_enabled' => Settings::get('blog_enabled', '0') === '1',
+            'blog_title' => Settings::get('blog_title', 'Blog'),
+            'blog_description' => Settings::get('blog_description', ''),
+            'blog_posts_per_page' => Settings::get('blog_posts_per_page', '10'),
         ]);
         
         // Font selection flags
@@ -8392,11 +9499,14 @@ class AdminController {
         Settings::set('site_name', Request::input('site_name', ''));
         Settings::set('tagline', Request::input('tagline', ''));
         Settings::set('logo_url', Request::input('logo_url', ''));
+        Settings::set('blog_enabled', Request::input('blog_enabled', '0') === '1' ? '1' : '0');
+        Settings::set('blog_title', Request::input('blog_title', 'Blog'));
+        Settings::set('blog_description', Request::input('blog_description', ''));
+        Settings::set('blog_posts_per_page', (string)max(1, (int)Request::input('blog_posts_per_page', '10')));
         
         // Save theme styles
         $styleKeys = [
             'color_primary', 'color_secondary', 'color_accent', 'color_background', 'color_text',
-            'color_primary_dark', 'color_secondary_dark', 'color_accent_dark', 'color_background_dark', 'color_text_dark',
             'font_family', 'header_bg', 'footer_text', 'head_scripts', 'footer_scripts'
         ];
         
@@ -8420,6 +9530,32 @@ class AdminController {
         Response::redirect('/admin/theme');
     }
     
+    // ─── DAISY UI THEME KIT ──────────────────────────────────────────────────
+    public static function themeKit(): void {
+        Auth::require('*');
+        $current = Settings::get('ui_theme', 'emerald');
+        $themes = [
+            'light','dark','cupcake','bumblebee','emerald','corporate','synthwave','retro',
+            'cyberpunk','valentine','halloween','garden','forest','aqua','lofi','pastel',
+            'fantasy','wireframe','black','luxury','dracula','cmyk','autumn','business',
+            'acid','lemonade','night','coffee','winter'
+        ];
+        self::renderAdmin('admin/theme_kit', 'Theme Kit', [
+            'current_theme' => $current,
+            'themes_json'   => json_encode($themes),
+        ], ['is_theme_kit' => true]);
+    }
+
+    public static function saveThemeKit(): void {
+        Auth::require('*');
+        CSRF::require();
+        $theme = Request::input('ui_theme', 'emerald');
+        Settings::set('ui_theme', $theme);
+        Cache::onContentChange('theme_styles');
+        Session::flash('success', "Theme switched to \"{$theme}\".");
+        Response::redirect('/admin/theme/kit');
+    }
+
     // ─── USERS MANAGEMENT ────────────────────────────────────────────────────
     public static function users(): void {
         Auth::require('*'); // Admin only
@@ -8596,12 +9732,19 @@ class PageController {
         
         // Get UI theme from settings
         $uiTheme = Settings::get('ui_theme', 'emerald');
+
+        // Per-page custom CSS from meta_json
+        $meta = json_decode($page['meta_json'] ?? '{}', true) ?? [];
+        $pageCustomCss = !empty($meta['custom_css'])
+            ? '<style>' . strip_tags($meta['custom_css']) . '</style>'
+            : '';
         
         // Render page
         $html = Template::render('page', array_merge($page, [
             'blocks_html' => $blocksHtml,
             'show_title' => $showTitle,
-            'ui_theme' => $uiTheme
+            'ui_theme' => $uiTheme,
+            'page_custom_css' => $pageCustomCss,
         ]));
         
         // Only cache if NOT in edit mode (cache without admin bar)
@@ -8629,11 +9772,16 @@ class PageController {
         $editButton = self::$editMode 
             ? '<a href="?" class="btn btn-error btn-sm">Exit Editor</a>'
             : '<a href="?edit" class="btn btn-primary btn-sm">Edit Page</a>';
+
+        $devBadge = ONECMS_DEV
+            ? '<span style="background:#fef3c7;color:#92400e;font-size:11px;font-family:monospace;padding:2px 8px;border-radius:4px;border:1px solid #f59e0b;">⚡ DEV — cache disabled</span>'
+            : '';
         
         $adminBar = <<<HTML
 <div class="fixed top-0 left-0 right-0 z-[10000] bg-neutral text-neutral-content px-4 py-2">
     <div class="max-w-7xl mx-auto flex items-center gap-4">
         <span class="font-bold text-primary">OneCMS</span>
+        {$devBadge}
         <div class="flex-1"></div>
         {$editButton}
         <a href="/admin" class="btn btn-ghost btn-sm">Dashboard</a>
@@ -8728,6 +9876,11 @@ WRAP;
             'map' => self::renderMap($data),
             'contact_info' => self::renderContactInfo($data),
             'social' => self::renderSocial($data),
+            'raw_html' => self::renderRawHtml($data),
+            'raw_js' => self::renderRawJs($data),
+            'game' => self::renderGame($data),
+            'link_tree' => self::renderLinkTree($data),
+            'embed' => self::renderEmbed($data),
             default => ''
         };
     }
@@ -9814,6 +10967,83 @@ HTML;
 </div>
 HTML;
     }
+    private static function renderRawHtml(array $data): string {
+        // Raw HTML block — rendered as-is; only admins can create these
+        $html = $data['html'] ?? $data['content'] ?? '';
+        if (empty($html)) return '';
+        return '<div class="py-4 reveal">' . $html . '</div>';
+    }
+
+    private static function renderRawJs(array $data): string {
+        $js = $data['js'] ?? $data['content'] ?? '';
+        if (empty($js)) return '';
+        $id = 'rawjs_' . substr(md5($js), 0, 8);
+        $title = Sanitize::html($data['title'] ?? '');
+        $titleHtml = $title ? "<p class=\"text-sm text-base-content/50 mb-2\">{$title}</p>" : '';
+        return "<div class=\"py-2 reveal\" id=\"{$id}\">{$titleHtml}<script>{$js}</script></div>";
+    }
+
+    private static function renderGame(array $data): string {
+        $url    = Sanitize::html($data['url'] ?? '');
+        $title  = Sanitize::html($data['title'] ?? 'Game');
+        $height = (int) ($data['height'] ?? 600);
+        if (empty($url)) return '';
+        return <<<HTML
+<div class="py-6 reveal">
+    <h3 class="text-xl font-semibold mb-3 text-center">{$title}</h3>
+    <div class="rounded-box overflow-hidden shadow-lg border border-base-200 mx-auto" style="max-width:900px">
+        <iframe src="{$url}" title="{$title}" width="100%" height="{$height}" frameborder="0" allowfullscreen allow="fullscreen; pointer-lock"></iframe>
+    </div>
+</div>
+HTML;
+    }
+
+    private static function renderLinkTree(array $data): string {
+        $title  = Sanitize::html($data['title'] ?? '');
+        $avatar = Sanitize::html($data['avatar'] ?? '');
+        $bio    = Sanitize::html($data['bio'] ?? '');
+        $links  = $data['links'] ?? [];
+        if (empty($links)) return '';
+
+        $avatarHtml = $avatar ? "<div class=\"avatar mb-3\"><div class=\"w-20 rounded-full ring ring-primary ring-offset-base-100 ring-offset-2\"><img src=\"{$avatar}\" alt=\"{$title}\"></div></div>" : '';
+        $titleHtml  = $title ? "<h2 class=\"text-2xl font-bold mb-1\">{$title}</h2>" : '';
+        $bioHtml    = $bio ? "<p class=\"text-base-content/60 mb-4\">{$bio}</p>" : '';
+
+        $linksHtml = '';
+        foreach ($links as $link) {
+            $label = Sanitize::html($link['label'] ?? $link['title'] ?? '');
+            $href  = Sanitize::html($link['url'] ?? '#');
+            $icon  = Sanitize::html($link['icon'] ?? '');
+            $iconHtml = $icon ? "<span class=\"mr-2\">{$icon}</span>" : '';
+            $linksHtml .= "<a href=\"{$href}\" class=\"btn btn-outline btn-block mb-3 text-base\" target=\"_blank\" rel=\"noopener\">{$iconHtml}{$label}</a>";
+        }
+
+        return <<<HTML
+<div class="py-8 flex flex-col items-center reveal">
+    {$avatarHtml}
+    {$titleHtml}
+    {$bioHtml}
+    <div class="w-full max-w-sm">
+        {$linksHtml}
+    </div>
+</div>
+HTML;
+    }
+
+    private static function renderEmbed(array $data): string {
+        $url    = Sanitize::html($data['url'] ?? '');
+        $title  = Sanitize::html($data['title'] ?? 'Embedded Content');
+        $height = (int) ($data['height'] ?? 400);
+        if (empty($url)) return '';
+        return <<<HTML
+<div class="py-6 reveal">
+    <div class="rounded-box overflow-hidden shadow border border-base-200">
+        <iframe src="{$url}" title="{$title}" width="100%" height="{$height}" frameborder="0" loading="lazy" allowfullscreen></iframe>
+    </div>
+    <p class="text-center text-xs text-base-content/40 mt-1">{$title}</p>
+</div>
+HTML;
+    }
 }
 
 class AssetController {
@@ -9884,91 +11114,14 @@ JS;
     
     public static function themeJs(): void {
         header('Content-Type: application/javascript');
-        header('Cache-Control: public, max-age=31536000');
+        header('Cache-Control: no-cache');
         echo <<<'JS'
-// Theme toggle functionality
+// Apply stored DaisyUI theme on load (no dark mode toggle)
 (function() {
-    const darkThemes = {
-        'emerald': 'forest',
-        'pastel': 'night',
-        'light': 'dark',
-        'corporate': 'business',
-        'cupcake': 'dracula',
-        'bumblebee': 'halloween',
-        'retro': 'coffee',
-        'garden': 'forest',
-        'lofi': 'black',
-        'fantasy': 'dracula',
-        'wireframe': 'black',
-        'cmyk': 'night',
-        'autumn': 'coffee',
-        'acid': 'night',
-        'lemonade': 'forest',
-        'winter': 'night',
-        'nord': 'dim',
-        // Already dark themes map to light
-        'forest': 'emerald',
-        'night': 'pastel',
-        'dark': 'light',
-        'business': 'corporate',
-        'dracula': 'cupcake',
-        'halloween': 'bumblebee',
-        'coffee': 'retro',
-        'black': 'lofi',
-        'dim': 'nord',
-        'luxury': 'corporate',
-        'synthwave': 'cupcake',
-        'cyberpunk': 'cupcake',
-        'aqua': 'dracula',
-        'valentine': 'dracula',
-        'sunset': 'cupcake'
-    };
-    
-    const lightThemes = ['emerald', 'pastel', 'light', 'corporate', 'cupcake', 'bumblebee', 'retro', 'garden', 'lofi', 'fantasy', 'wireframe', 'cmyk', 'autumn', 'acid', 'lemonade', 'winter', 'nord'];
-    
-    function getCurrentTheme() {
-        return document.documentElement.getAttribute('data-theme') || 'emerald';
+    var stored = localStorage.getItem('onecms-theme');
+    if (stored) {
+        document.documentElement.setAttribute('data-theme', stored);
     }
-    
-    function isLightTheme(theme) {
-        return lightThemes.includes(theme);
-    }
-    
-    function setTheme(theme, saveBase = true) {
-        document.documentElement.setAttribute('data-theme', theme);
-        if (saveBase) {
-            const baseTheme = isLightTheme(theme) ? theme : (darkThemes[theme] || 'emerald');
-            localStorage.setItem('onecms-base-theme', baseTheme);
-        }
-        localStorage.setItem('onecms-is-dark', !isLightTheme(theme));
-        updateToggle();
-    }
-    
-    function updateToggle() {
-        const toggle = document.getElementById('theme-toggle');
-        if (toggle) {
-            const isDark = !isLightTheme(getCurrentTheme());
-            toggle.checked = isDark;
-        }
-    }
-    
-    function toggleTheme() {
-        const current = getCurrentTheme();
-        const newTheme = darkThemes[current] || 'dark';
-        setTheme(newTheme, false);
-    }
-    
-    // Initialize
-    document.addEventListener('DOMContentLoaded', function() {
-        const toggle = document.getElementById('theme-toggle');
-        if (toggle) {
-            toggle.addEventListener('change', toggleTheme);
-        }
-        updateToggle();
-    });
-    
-    // Also update immediately in case DOM is already loaded
-    updateToggle();
 })();
 JS;
         exit;
@@ -10474,6 +11627,32 @@ CSS;
             overlay.remove();
         };
         overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+        
+        // ── Focus trap: keep Tab key inside the modal ──
+        overlay.addEventListener('keydown', function(e) {
+            if (e.key !== 'Tab') return;
+            const focusable = Array.from(overlay.querySelectorAll(
+                'a[href],button:not([disabled]),input,select,textarea,[tabindex]:not([tabindex="-1"])'
+            ));
+            if (focusable.length === 0) return;
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (e.shiftKey ? document.activeElement === first : document.activeElement === last) {
+                e.preventDefault();
+                (e.shiftKey ? last : first).focus();
+            }
+        });
+
+        // ── Escape closes modal ──
+        overlay.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') overlay.remove();
+        });
+
+        // Focus the first focusable element
+        setTimeout(() => {
+            const first = overlay.querySelector('input,textarea,select,button');
+            if (first) first.focus();
+        }, 50);
         
         // Add event delegation for actions
         overlay.addEventListener('click', function(e) {
@@ -10997,12 +12176,31 @@ CSS;
                     method: 'POST',
                     body: formData
                 });
-                
-                if (res.ok) {
+
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    toast(err.error || 'Failed to update block', 'error');
+                    return;
+                }
+
+                const data = await res.json();
+                if (data.rendered_html) {
+                    // Swap block content in-place without a full page reload
+                    const wrapper = document.querySelector(`[data-block-id="${blockId}"]`);
+                    if (wrapper) {
+                        const tmp = document.createElement('div');
+                        tmp.innerHTML = data.rendered_html;
+                        const newContent = tmp.firstElementChild;
+                        if (newContent) {
+                            wrapper.querySelector('.onecms-block-content')
+                                ? wrapper.querySelector('.onecms-block-content').innerHTML = data.rendered_html
+                                : wrapper.outerHTML = data.rendered_html;
+                        }
+                    }
+                    toast('Block updated!');
+                } else {
                     toast('Block updated! Refreshing...');
                     setTimeout(() => location.reload(), 500);
-                } else {
-                    toast('Failed to update block', 'error');
                 }
             } catch (e) {
                 toast('Error: ' + e.message, 'error');
@@ -11302,7 +12500,30 @@ CSS;
     
     // Initialize
     function init() {
-        // Handle block actions
+        // ── Toolbar: event-based show/hide (more reliable than CSS :hover alone) ──
+        document.querySelectorAll('.onecms-block-wrapper').forEach(wrapper => {
+            const toolbar = wrapper.querySelector('.onecms-block-toolbar');
+            let hideTimer = null;
+
+            function showToolbar() {
+                clearTimeout(hideTimer);
+                if (toolbar) { toolbar.style.opacity = '1'; toolbar.style.transform = 'translateY(0)'; }
+            }
+            function scheduleHide() {
+                hideTimer = setTimeout(() => {
+                    if (toolbar) { toolbar.style.opacity = ''; toolbar.style.transform = ''; }
+                }, 120);
+            }
+
+            wrapper.addEventListener('mouseenter', showToolbar);
+            wrapper.addEventListener('mouseleave', scheduleHide);
+            if (toolbar) {
+                toolbar.addEventListener('mouseenter', showToolbar);
+                toolbar.addEventListener('mouseleave', scheduleHide);
+            }
+        });
+
+        // ── Block action buttons ──
         document.querySelectorAll('.onecms-block-wrapper').forEach(wrapper => {
             wrapper.querySelectorAll('.block-action').forEach(btn => {
                 btn.onclick = (e) => {
@@ -11387,8 +12608,12 @@ class BlockAPI {
         if ($page) {
             Cache::invalidatePage($page['slug']);
         }
+
+        // Return rendered HTML so the editor can swap in-place without a reload
+        $updatedBlock = DB::fetch("SELECT * FROM content_blocks WHERE id = ?", [$id]);
+        $renderedHtml = $updatedBlock ? PageController::renderBlockForCache($updatedBlock) : '';
         
-        Response::json(['success' => true]);
+        Response::json(['success' => true, 'rendered_html' => $renderedHtml]);
     }
     
     public static function move(int $id): void {
@@ -11506,6 +12731,37 @@ class BlockAPI {
         }
         
         Response::json(['success' => true, 'id' => DB::connect()->lastInsertId()]);
+    }
+
+    public static function schema(): void {
+        Auth::require('content.edit');
+        $type = $_GET['type'] ?? '';
+        // Return the default JSON schema / template for a given block type
+        $schemas = [
+            'hero'         => ['title' => 'Main Headline', 'subtitle' => 'Supporting text', 'button' => 'Get Started', 'url' => '/contact'],
+            'text'         => ['content' => '<p>Your text here...</p>'],
+            'cta'          => ['title' => 'Call to Action', 'text' => 'Short description', 'button' => 'Learn More', 'url' => '/contact'],
+            'features'     => ['title' => 'Features', 'subtitle' => '', 'items' => [['icon' => 'bolt', 'title' => 'Feature', 'description' => 'Description']], 'columns' => 3],
+            'stats'        => ['title' => 'By the Numbers', 'items' => [['value' => '100+', 'label' => 'Clients', 'icon' => 'groups']]],
+            'testimonials' => ['title' => 'What Clients Say', 'items' => [['quote' => 'Great work!', 'author' => 'Name', 'role' => 'Title, Company', 'rating' => 5]]],
+            'pricing'      => ['title' => 'Pricing', 'subtitle' => '', 'plans' => [['name' => 'Basic', 'price' => '$9', 'period' => '/mo', 'features' => ['Feature 1'], 'button' => 'Start', 'url' => '#', 'featured' => false]]],
+            'team'         => ['title' => 'Our Team', 'members' => [['name' => 'Name', 'role' => 'Title', 'bio' => 'Bio', 'photo' => '']]],
+            'faq'          => ['title' => 'FAQ', 'items' => [['question' => 'Question?', 'answer' => 'Answer.']]],
+            'cards'        => ['title' => '', 'items' => [['title' => 'Card', 'description' => 'Description', 'url' => '#', 'button' => 'Learn More']]],
+            'gallery'      => ['title' => '', 'images' => [['url' => '/image.jpg', 'alt' => 'Alt text']], 'columns' => 3],
+            'image'        => ['url' => '/image.jpg', 'alt' => 'Description', 'caption' => ''],
+            'video'        => ['title' => '', 'url' => 'https://www.youtube.com/embed/...', 'caption' => ''],
+            'quote'        => ['text' => 'Notable quote here.', 'author' => 'Author', 'role' => 'Title'],
+            'form'         => [],
+            'newsletter'   => ['title' => 'Stay Updated', 'text' => 'Subscribe for updates.', 'button' => 'Subscribe', 'placeholder' => 'your@email.com'],
+            'raw_html'     => ['html' => '<div>Custom HTML</div>'],
+            'raw_js'       => ['title' => 'Widget', 'js' => '// Your JavaScript here'],
+            'game'         => ['title' => 'Play', 'url' => 'https://example.com/game', 'height' => 600],
+            'link_tree'    => ['title' => 'Your Name', 'bio' => 'Short bio', 'avatar' => '', 'links' => [['label' => 'Website', 'url' => 'https://example.com', 'icon' => '🌐']]],
+            'embed'        => ['title' => 'Embedded Content', 'url' => 'https://example.com/embed', 'height' => 400],
+        ];
+        $schema = $schemas[$type] ?? new stdClass();
+        Response::json(['type' => $type, 'schema' => $schema]);
     }
 }
 
@@ -11684,6 +12940,10 @@ class AIPageAPI {
         'faq' => ['hero', 'faq', 'accordion', 'contact_info', 'cta'],
         'team' => ['hero', 'team', 'text', 'stats', 'testimonials', 'cta'],
         'product' => ['hero', 'features', 'gallery', 'stats', 'testimonials', 'comparison', 'pricing', 'faq', 'cta'],
+        'game' => ['hero', 'game', 'text', 'features', 'cta'],
+        'linktree' => ['link_tree'],
+        'tool' => ['hero', 'embed', 'text', 'faq', 'cta'],
+        'social' => ['hero', 'link_tree', 'gallery', 'cta'],
         'custom' => ['hero', 'text', 'features', 'cards', 'testimonials', 'cta', 'form']
     ];
 
@@ -11723,7 +12983,12 @@ class AIPageAPI {
         'image' => '{"type": "image", "content": {"url": "/image.jpg", "alt": "Image description", "caption": "Optional caption"}}',
         'divider' => '{"type": "divider", "content": {"style": "line"}}',
         'spacer' => '{"type": "spacer", "content": {"size": "medium"}}',
-        'columns' => '{"type": "columns", "content": {"columns": [{"content": "<p>Column 1</p>"}, {"content": "<p>Column 2</p>"}]}}'
+        'columns' => '{"type": "columns", "content": {"columns": [{"content": "<p>Column 1</p>"}, {"content": "<p>Column 2</p>"}]}}',
+        'raw_html' => '{"type": "raw_html", "content": {"html": "<div>Custom HTML block</div>"}}',
+        'raw_js' => '{"type": "raw_js", "content": {"title": "Interactive Widget", "js": "// your JavaScript here"}}',
+        'game' => '{"type": "game", "content": {"title": "Play Now", "url": "https://example.com/game", "height": 600}}',
+        'link_tree' => '{"type": "link_tree", "content": {"title": "Your Name", "bio": "Short bio", "avatar": "/photo.jpg", "links": [{"label": "Website", "url": "https://example.com", "icon": "🌐"}, {"label": "Twitter", "url": "https://twitter.com/", "icon": "🐦"}]}}',
+        'embed' => '{"type": "embed", "content": {"title": "Embedded Content", "url": "https://example.com/embed", "height": 400}}'
     ];
 
     public static function generate(): void {
@@ -11846,6 +13111,14 @@ BLOCK ORDER BEST PRACTICES:
 RESPOND ONLY WITH VALID JSON - no markdown, no explanation, no code blocks.
 PROMPT;
     }
+
+    /**
+     * Public helper: get recommended block types for a given page type.
+     * Used by AIOrchestrator for per-page generation.
+     */
+    public static function getBlocksForType(string $pageType): array {
+        return self::$pageTypeBlocks[$pageType] ?? self::$pageTypeBlocks['custom'];
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -11873,14 +13146,73 @@ class AI {
     }
     
     /**
+     * Multi-turn chat: accepts an array of {role, content} messages and returns plain text.
+     * Used by AIConversation for the interactive design wizard.
+     */
+    public static function generateChat(array $messages, string $systemPrompt = ''): string {
+        $config = self::getProvider();
+        if (empty($config['api_key'])) return 'AI is not configured yet.';
+
+        $text = match($config['provider']) {
+            'anthropic' => self::anthropicChatRequest($messages, $systemPrompt, $config),
+            'google'    => self::googleChatRequest($messages, $systemPrompt, $config),
+            default     => self::openaiChatRequest($messages, $systemPrompt, $config),
+        };
+
+        return $text ?? 'Sorry, I could not get a response. Please try again.';
+    }
+
+    private static function openaiChatRequest(array $messages, string $system, array $config): ?string {
+        $payload = ['model' => $config['model'], 'temperature' => 0.8, 'max_tokens' => 1024,
+            'messages' => array_merge($system ? [['role' => 'system', 'content' => $system]] : [], $messages)];
+        $ch = curl_init('https://api.openai.com/v1/chat/completions');
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_TIMEOUT => 60,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Authorization: Bearer ' . $config['api_key']],
+            CURLOPT_POSTFIELDS => json_encode($payload)]);
+        $res = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
+        if ($code !== 200) return null;
+        $data = json_decode($res, true);
+        return $data['choices'][0]['message']['content'] ?? null;
+    }
+
+    private static function anthropicChatRequest(array $messages, string $system, array $config): ?string {
+        $model = $config['model'];
+        if (!str_starts_with($model, 'claude')) $model = 'claude-sonnet-4-5';
+        $payload = ['model' => $model, 'max_tokens' => 1024, 'messages' => $messages];
+        if ($system) $payload['system'] = $system;
+        $ch = curl_init('https://api.anthropic.com/v1/messages');
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_TIMEOUT => 60,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'X-API-Key: ' . $config['api_key'], 'anthropic-version: 2023-06-01'],
+            CURLOPT_POSTFIELDS => json_encode($payload)]);
+        $res = curl_exec($ch); curl_close($ch);
+        $data = json_decode($res, true);
+        return $data['content'][0]['text'] ?? null;
+    }
+
+    private static function googleChatRequest(array $messages, string $system, array $config): ?string {
+        $model = $config['model'];
+        if (!str_contains($model, 'gemini')) $model = 'gemini-2.0-flash-exp';
+        $parts = [];
+        if ($system) $parts[] = ['text' => $system . "\n\n"];
+        foreach ($messages as $m) $parts[] = ['text' => ($m['role'] === 'user' ? 'User: ' : 'Assistant: ') . $m['content'] . "\n"];
+        $payload = ['contents' => [['parts' => $parts]], 'generationConfig' => ['maxOutputTokens' => 1024, 'temperature' => 0.8]];
+        $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key=" . $config['api_key'];
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_TIMEOUT => 60,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json'], CURLOPT_POSTFIELDS => json_encode($payload)]);
+        $res = curl_exec($ch); curl_close($ch);
+        $data = json_decode($res, true);
+        return $data['candidates'][0]['content']['parts'][0]['text'] ?? null;
+    }
+
+    /**
      * Generate content using the configured AI provider
      */
     public static function generate(string $prompt): ?array {
         $config = self::getProvider();
-        
+
         // Debug logging
         error_log("=== AI GENERATE START ===");
-        error_log("Provider: " . $config['provider']);
         error_log("Model: " . $config['model']);
         error_log("Prompt length: " . strlen($prompt) . " chars");
         
@@ -12274,9 +13606,9 @@ PALETTE 5 - Rose (Beauty/Lifestyle/Fashion):
   primary: #e11d48, secondary: #be123c, accent: #fb7185, background: #fff1f2, text: #1c1917
   header_bg: #1c1917, header_text: #fecdd3, footer_bg: #1c1917, footer_text: #fecdd3, cta_bg: #e11d48, cta_text: #ffffff
 
-PALETTE 6 - Indigo Tech (Technology/SaaS/Startup):
-  primary: #4f46e5, secondary: #4338ca, accent: #818cf8, background: #ffffff, text: #1e293b
-  header_bg: #0f172a, header_text: #e0e7ff, footer_bg: #1e293b, footer_text: #e0e7ff, cta_bg: #4f46e5, cta_text: #ffffff
+PALETTE 6 - Crimson Red (Bold/Sports/Events):
+  primary: #dc2626, secondary: #b91c1c, accent: #f87171, background: #ffffff, text: #1e293b
+  header_bg: #0f172a, header_text: #fee2e2, footer_bg: #1e293b, footer_text: #fee2e2, cta_bg: #dc2626, cta_text: #ffffff
 
 PALETTE 7 - Teal Modern (Consulting/Agency/Services):
   primary: #0d9488, secondary: #0f766e, accent: #2dd4bf, background: #ffffff, text: #1e293b
@@ -12290,7 +13622,187 @@ DESIGN EXCELLENCE RULES:
 5. Stats should have impressive, specific numbers with + or % signs
 6. Testimonials should include realistic names and roles
 7. Generate 4-5 pages typically: Home, About, Services/Products, Pricing, Contact
+8. CRITICAL: NEVER use purple, violet, indigo, or magenta colors anywhere. Forbidden hex values include but are not limited to: #7c3aed, #8b5cf6, #a855f7, #9333ea, #4f46e5, #4338ca, #6366f1, #818cf8, #a78bfa, #7e22ce, #6d28d9
+9. CRITICAL: All pages MUST share the same primary color, font family, and spacing scale chosen from the selected palette. The site must look visually unified across every page.
 PROMPT;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 14B: AI ORCHESTRATOR (MULTI-CALL GENERATION)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * AIOrchestrator: Coordinates multiple AI calls to build a full site.
+ * Exposes an SSE endpoint that streams progress updates to the client.
+ */
+class AIOrchestrator {
+
+    /** Send one SSE event. Flushes immediately. */
+    private static function sseEvent(string $event, array $data): void {
+        echo "event: {$event}\n";
+        echo 'data: ' . json_encode($data) . "\n\n";
+        if (ob_get_level()) ob_flush();
+        flush();
+    }
+
+    /**
+     * SSE endpoint: POST /api/ai/stream
+     * Accepts the same parameters as the regular AI form, but streams the
+     * multi-stage generation process back to the client in real time.
+     */
+    public static function stream(): void {
+        Auth::require('content.edit');
+
+        // SSE headers
+        header('Content-Type: text/event-stream');
+        header('Cache-Control: no-cache');
+        header('X-Accel-Buffering: no'); // disable nginx buffering
+        if (ob_get_level()) ob_end_clean();
+
+        $input        = json_decode(file_get_contents('php://input'), true) ?? [];
+        $bizName      = trim($input['business_name'] ?? '');
+        $industry     = trim($input['industry'] ?? '');
+        $description  = trim($input['description'] ?? '');
+        $tone         = trim($input['tone'] ?? 'professional');
+        $colorPref    = trim($input['color_preference'] ?? '');
+        $uiTheme      = trim($input['ui_theme'] ?? 'light');
+        $pagesNeeded  = trim($input['pages_needed'] ?? '');
+        $userContent  = trim($input['user_content'] ?? '');
+        $features     = (array)($input['features'] ?? []);
+
+        // Build unified prompt from form fields
+        $promptParts = [];
+        if ($bizName)     $promptParts[] = "Business name: {$bizName}";
+        if ($industry)    $promptParts[] = "Industry: {$industry}";
+        if ($description) $promptParts[] = "Description: {$description}";
+        if ($tone)        $promptParts[] = "Tone: {$tone}";
+        if ($colorPref)   $promptParts[] = "Color preference: {$colorPref}";
+        if ($pagesNeeded) $promptParts[] = "Pages needed: {$pagesNeeded}";
+        if ($userContent) $promptParts[] = "Existing content: {$userContent}";
+        if ($features)    $promptParts[] = "Features: " . implode(', ', $features);
+        $prompt = implode('. ', $promptParts);
+
+        if (empty(trim($bizName . $description))) {
+            self::sseEvent('error', ['message' => 'Business name and description are required.']);
+            return;
+        }
+
+        $pageType = 'landing'; // default fallback for per-page generation
+
+        if (!AI::isConfigured()) {
+            self::sseEvent('error', ['message' => 'AI is not configured. Add an API key in Settings.']);
+            return;
+        }
+
+        try {
+            // ── Stage 1: Site Structure ──────────────────────────────────
+            self::sseEvent('stage', ['stage' => 1, 'label' => 'Designing site structure…', 'total' => 3]);
+
+            $structurePrompt = <<<EOT
+You are an expert web designer. Based on the following brief, generate a site blueprint.
+Brief: {$prompt}
+Preferred UI theme: {$uiTheme}
+
+Respond with ONLY valid JSON (no markdown, no explanation):
+{
+  "site_name": "Business Name",
+  "tagline": "A catchy tagline",
+  "ui_theme": "{$uiTheme}",
+  "colors": {
+    "primary": "#hex", "secondary": "#hex", "accent": "#hex",
+    "background": "#fff", "text": "#1e293b",
+    "header_bg": "#hex", "header_text": "#f8fafc",
+    "footer_bg": "#1e293b", "footer_text": "#f1f5f9",
+    "cta_bg": "#hex", "cta_text": "#ffffff"
+  },
+  "nav": [{"label": "Home", "url": "/"}, {"label": "About", "url": "/about"}],
+  "pages": [
+    {"slug": "home", "title": "Home", "meta_description": "...", "page_type": "landing"},
+    {"slug": "about", "title": "About", "meta_description": "...", "page_type": "about"}
+  ],
+  "footer": {"text": "© 2025 Business Name.", "links": [], "social": []}
+}
+Rules: Never use purple/violet/indigo. Use a harmonious color palette. 3–5 pages.
+EOT;
+
+            $structure = AI::generate($structurePrompt);
+            if (!$structure) {
+                self::sseEvent('error', ['message' => 'Stage 1 failed — AI did not return a structure.']);
+                return;
+            }
+
+            self::sseEvent('stage_complete', ['stage' => 1, 'data' => [
+                'site_name' => $structure['site_name'] ?? '',
+                'ui_theme'  => $structure['ui_theme'] ?? 'emerald',
+                'pages'     => array_column($structure['pages'] ?? [], 'title'),
+            ]]);
+
+            // ── Stage 2: Generate Content Per Page ───────────────────────
+            $pages         = $structure['pages'] ?? [];
+            $builtPages    = [];
+            $totalPages    = count($pages);
+
+            foreach ($pages as $i => $pageMeta) {
+                $label   = $pageMeta['title'] ?? ('Page ' . ($i + 1));
+                $pageNum = $i + 1;
+                self::sseEvent('stage', [
+                    'stage'   => 2,
+                    'label'   => "Generating content for \"{$label}\" ({$pageNum}/{$totalPages})\u{2026}",
+                    'message' => "Writing content for \"{$label}\" ({$pageNum}/{$totalPages})\u{2026}",
+                    'page'    => $label,
+                    'total'   => 3,
+                    'sub_progress' => ['current' => $pageNum, 'total' => $totalPages],
+                ]);
+
+                $pType      = $pageMeta['page_type'] ?? $pageType;
+                $recommended = AIPageAPI::getBlocksForType($pType);
+                $blockList   = implode(', ', $recommended);
+
+                $pagePrompt = <<<EOT
+Site: {$structure['site_name']}. Colors: primary={$structure['colors']['primary']}, accent={$structure['colors']['accent']}.
+Page: "{$label}" (type: {$pType}).
+User brief: {$prompt}
+
+Generate the content blocks for this page. Respond with ONLY valid JSON:
+{
+  "slug": "{$pageMeta['slug']}",
+  "title": "{$label}",
+  "meta_description": "...",
+  "blocks": [
+    {"type": "hero", "content": {...}},
+    ...
+  ]
+}
+
+Recommended block types for {$pType}: {$blockList}
+Rules: Use the site's primary color. No purple/indigo. Start with a hero block. End with a CTA.
+EOT;
+
+                $pageResult = AI::generate($pagePrompt);
+                if ($pageResult && !empty($pageResult['blocks'])) {
+                    $builtPages[] = array_merge($pageMeta, [
+                        'blocks'           => $pageResult['blocks'],
+                        'meta_description' => $pageResult['meta_description'] ?? ($pageMeta['meta_description'] ?? ''),
+                    ]);
+                } else {
+                    // Fallback: add the page with a minimal hero block
+                    $builtPages[] = array_merge($pageMeta, [
+                        'blocks' => [['type' => 'hero', 'content' => ['title' => $label, 'subtitle' => '', 'button' => 'Learn More', 'url' => '/contact']]],
+                    ]);
+                }
+            }
+
+            // ── Stage 3: Assemble Full Plan ──────────────────────────────
+            self::sseEvent('stage', ['stage' => 3, 'label' => 'Assembling final plan…', 'total' => 3]);
+
+            $fullPlan = array_merge($structure, ['pages' => $builtPages]);
+
+            self::sseEvent('complete', ['plan' => $fullPlan]);
+
+        } catch (Exception $e) {
+            self::sseEvent('error', ['message' => $e->getMessage()]);
+        }
     }
 }
 
@@ -12806,6 +14318,149 @@ PROMPT;
     }
 }
 
+/**
+ * AIConversation: Session-backed multi-turn chat that acts as a web design consultant.
+ * Users describe their business conversationally; AI asks questions and eventually
+ * produces a JSON brief that can be piped into AIOrchestrator::stream().
+ */
+class AIConversation {
+
+    private const SESSION_KEY = 'onecms_ai_chat';
+
+    /** Start (or return existing) conversation in session */
+    public static function init(): void {
+        if (!isset($_SESSION[self::SESSION_KEY])) {
+            self::reset();
+        }
+    }
+
+    /** Return full message history array */
+    public static function history(): array {
+        return $_SESSION[self::SESSION_KEY]['messages'] ?? [];
+    }
+
+    /** Clear conversation */
+    public static function reset(): void {
+        $_SESSION[self::SESSION_KEY] = ['messages' => []];
+    }
+
+    /**
+     * Send a user message, get an AI reply.
+     * Returns ['reply' => string, 'ready' => bool, 'brief' => array|null]
+     *   ready=true when AI has enough info to generate the site.
+     */
+    public static function chat(string $userMessage): array {
+        self::init();
+
+        $history   = self::history();
+        $history[] = ['role' => 'user', 'content' => $userMessage];
+
+        $systemPrompt = <<<'SYS'
+You are a friendly, expert web design consultant helping a client describe what they want for their website.
+Your goal is to gather enough information to build a complete website for them through a natural conversation.
+Ask about: business name, industry, services/products, target audience, tone, color preferences, what pages they need, any special features.
+Keep responses concise (2-4 sentences max) and ask ONE follow-up question at a time.
+Once you have enough information (after 3-6 exchanges), respond with EXACTLY this JSON on its own line:
+{"__READY__": true, "brief": {"business_name": "...", "industry": "...", "description": "...", "tone": "professional", "color_preference": "...", "pages_needed": "...", "features": []}}
+Do not include anything else on that line. Before that line you may write a brief summary message.
+SYS;
+
+        // Build messages for AI call
+        $messages = [];
+        foreach ($history as $msg) {
+            $messages[] = $msg;
+        }
+
+        $reply  = AI::generateChat($messages, $systemPrompt);
+        $ready  = false;
+        $brief  = null;
+
+        // Scan reply for __READY__ JSON marker
+        foreach (explode("\n", $reply) as $line) {
+            $line = trim($line);
+            if (str_starts_with($line, '{"__READY__"')) {
+                $decoded = json_decode($line, true);
+                if ($decoded && !empty($decoded['brief'])) {
+                    $ready = true;
+                    $brief = $decoded['brief'];
+                    // Remove the JSON line from the visible reply
+                    $reply = trim(str_replace($line, '', $reply));
+                }
+                break;
+            }
+        }
+
+        $history[] = ['role' => 'assistant', 'content' => $reply];
+        $_SESSION[self::SESSION_KEY]['messages'] = $history;
+
+        return ['reply' => $reply, 'ready' => $ready, 'brief' => $brief];
+    }
+}
+
+/**
+ * AIChatController: Admin controller for the conversational AI chat wizard.
+ */
+class AIChatController {
+
+    private static function renderAdmin(string $template, array $data = []): void {
+        $user    = Auth::user();
+        $content = Template::render($template, $data);
+        Response::html(Template::render('admin_layout', array_merge($data, [
+            'content'       => $content,
+            'user_email'    => $user['email'] ?? '',
+            'user_role'     => $user['role'] ?? '',
+            'flash_error'   => Session::getFlash('error'),
+            'flash_success' => Session::getFlash('success'),
+            'csp_nonce'     => defined('CSP_NONCE') ? CSP_NONCE : '',
+            'is_ai_chat'    => true,
+            'csrf_field'    => '<input type="hidden" name="_csrf" value="' . CSRF::token() . '">'
+        ])));
+    }
+
+    /** GET /admin/ai/chat */
+    public static function chat(): void {
+        Auth::require('*');
+        AIConversation::init();
+        self::renderAdmin('admin_ai_chat', [
+            'is_configured' => AI::isConfigured(),
+            'history'       => AIConversation::history(),
+            'csrf_token'    => CSRF::token(),
+        ]);
+    }
+
+    /** POST /api/ai/chat  — JSON endpoint */
+    public static function send(): void {
+        Auth::require('content.edit');
+
+        $input   = json_decode(file_get_contents('php://input'), true) ?? [];
+        $message = trim($input['message'] ?? '');
+
+        if (!$message) {
+            Response::json(['error' => 'Empty message.'], 400);
+            return;
+        }
+        if (!AI::isConfigured()) {
+            Response::json(['error' => 'AI is not configured.'], 503);
+            return;
+        }
+
+        $result = AIConversation::chat($message);
+        Response::json([
+            'reply'   => $result['reply'],
+            'ready'   => $result['ready'],
+            'brief'   => $result['brief'],
+            'history' => AIConversation::history(),
+        ]);
+    }
+
+    /** POST /api/ai/chat/reset  — clears session history */
+    public static function resetChat(): void {
+        Auth::require('*');
+        AIConversation::reset();
+        Response::json(['ok' => true]);
+    }
+}
+
 class BuildQueue {
     /**
      * Get all pending build queue items
@@ -12873,6 +14528,11 @@ class BuildQueue {
         $plan = json_decode($queue['plan_json'], true);
         if (!$plan) {
             return false;
+        }
+
+        // Backward-compat: if the plan IS a single page (has 'blocks' but no 'pages'), wrap it
+        if (!isset($plan['pages']) && isset($plan['blocks'])) {
+            $plan['pages'] = [$plan];
         }
         
         $db = DB::connect();
@@ -13043,6 +14703,34 @@ class ApprovalController {
         ]);
     }
     
+    /**
+     * Store a plan from the SSE orchestrator (POST /admin/approvals)
+     */
+    public static function store(): void {
+        Auth::require('content.edit');
+        CSRF::require();
+
+        $planJson = $_POST['plan_json'] ?? '';
+        if (!$planJson) {
+            Session::flash('error', 'No plan data received.');
+            Response::redirect('/admin/approvals');
+        }
+
+        $plan = json_decode($planJson, true);
+        if (!$plan || empty($plan['pages'])) {
+            Session::flash('error', 'Plan data is invalid or missing pages.');
+            Response::redirect('/admin/approvals');
+        }
+
+        DB::execute(
+            "INSERT INTO build_queue (plan_json, status, created_at) VALUES (?, 'pending', datetime('now'))",
+            [json_encode($plan)]
+        );
+
+        Session::flash('success', 'Site plan queued for approval!');
+        Response::redirect('/admin/approvals');
+    }
+
     /**
      * View a single approval item
      */
@@ -13472,6 +15160,380 @@ HTML;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SECTION 14B: BLOG MODULE
+// ─────────────────────────────────────────────────────────────────────────────
+
+class BlogController {
+
+    private static function getNavAndFooter(): array {
+        return [
+            'nav_html'    => Template::partial('nav'),
+            'footer_html' => Template::partial('footer'),
+            'ui_theme'    => Settings::get('ui_theme', 'light'),
+            'site_name'   => Settings::get('site_name', 'Site'),
+        ];
+    }
+
+    /** GET /blog */
+    public static function index(): void {
+        if (Settings::get('blog_enabled', '0') !== '1') { Response::notFound(); return; }
+        $perPage  = (int)(Settings::get('blog_posts_per_page', '10'));
+        $page     = max(1, (int)($_GET['page'] ?? 1));
+        $status   = $_GET['status'] ?? null;
+
+        $where  = "WHERE p.status = 'published'";
+        $params = [];
+        if ($status === 'category' && isset($_GET['cat'])) {
+            // handled by category() below
+        }
+
+        $total   = (int)(DB::fetch("SELECT COUNT(*) as c FROM blog_posts p $where", $params)['c'] ?? 0);
+        $offset  = ($page - 1) * $perPage;
+        $posts   = DB::fetchAll(
+            "SELECT p.*, u.email as author_name, c.name as category_name, c.slug as category_slug,
+                    CASE WHEN a.hash IS NOT NULL THEN '/assets/' || a.hash ELSE NULL END as cover_url
+             FROM blog_posts p
+             LEFT JOIN users u ON u.id = p.author_id
+             LEFT JOIN blog_categories c ON c.id = p.category_id
+             LEFT JOIN assets a ON a.id = p.cover_asset_id
+             $where ORDER BY p.published_at DESC LIMIT ? OFFSET ?",
+            array_merge($params, [$perPage, $offset])
+        );
+
+        foreach ($posts as &$post) {
+            $post['published_at_fmt'] = $post['published_at']
+                ? date('M j, Y', strtotime($post['published_at'])) : '';
+        }
+
+        $totalPages = (int)ceil($total / $perPage);
+
+        Response::html(Template::render('blog_index', array_merge(self::getNavAndFooter(), [
+            'posts'            => $posts,
+            'blog_title'       => Settings::get('blog_title', 'Blog'),
+            'blog_description' => Settings::get('blog_description', ''),
+            'has_pagination'   => $totalPages > 1,
+            'current_page'     => $page,
+            'total_pages'      => $totalPages,
+            'prev_page'        => $page > 1 ? $page - 1 : null,
+            'next_page'        => $page < $totalPages ? $page + 1 : null,
+        ])));
+    }
+
+    /** GET /blog/category/{slug} */
+    public static function category(string $slug): void {
+        if (Settings::get('blog_enabled', '0') !== '1') { Response::notFound(); return; }
+        $cat = DB::fetch("SELECT * FROM blog_categories WHERE slug = ?", [$slug]);
+        if (!$cat) { http_response_code(404); echo '404 Not Found'; return; }
+
+        $perPage  = (int)(Settings::get('blog_posts_per_page', '10'));
+        $page     = max(1, (int)($_GET['page'] ?? 1));
+
+        $total  = (int)(DB::fetch("SELECT COUNT(*) as c FROM blog_posts WHERE status='published' AND category_id=?", [$cat['id']])['c'] ?? 0);
+        $offset = ($page - 1) * $perPage;
+        $posts  = DB::fetchAll(
+            "SELECT p.*, u.email as author_name, c.name as category_name, c.slug as category_slug,
+                    CASE WHEN a.hash IS NOT NULL THEN '/assets/' || a.hash ELSE NULL END as cover_url
+             FROM blog_posts p
+             LEFT JOIN users u ON u.id=p.author_id
+             LEFT JOIN blog_categories c ON c.id=p.category_id
+             LEFT JOIN assets a ON a.id=p.cover_asset_id
+             WHERE p.status='published' AND p.category_id=?
+             ORDER BY p.published_at DESC LIMIT ? OFFSET ?",
+            [$cat['id'], $perPage, $offset]
+        );
+        foreach ($posts as &$post) {
+            $post['published_at_fmt'] = $post['published_at'] ? date('M j, Y', strtotime($post['published_at'])) : '';
+        }
+        $totalPages = (int)ceil($total / $perPage);
+
+        Response::html(Template::render('blog_index', array_merge(self::getNavAndFooter(), [
+            'posts'         => $posts,
+            'blog_title'    => $cat['name'],
+            'blog_description' => $cat['description'] ?? '',
+            'has_pagination' => $totalPages > 1,
+            'current_page'  => $page, 'total_pages' => $totalPages,
+            'prev_page'     => $page > 1 ? $page - 1 : null,
+            'next_page'     => $page < $totalPages ? $page + 1 : null,
+        ])));
+    }
+
+    /** GET /blog/{slug} */
+    public static function post(string $slug): void {
+        if (Settings::get('blog_enabled', '0') !== '1') { Response::notFound(); return; }
+        $post = DB::fetch(
+            "SELECT p.*, u.email as author_name, c.name as category_name, c.slug as category_slug,
+                    CASE WHEN a.hash IS NOT NULL THEN '/assets/' || a.hash ELSE NULL END as cover_url,
+                    CASE WHEN og.hash IS NOT NULL THEN '/assets/' || og.hash ELSE NULL END as og_image_url
+             FROM blog_posts p
+             LEFT JOIN users u ON u.id=p.author_id
+             LEFT JOIN blog_categories c ON c.id=p.category_id
+             LEFT JOIN assets a ON a.id=p.cover_asset_id
+             LEFT JOIN assets og ON og.id=p.og_image_asset_id
+             WHERE p.slug=? AND p.status='published'",
+            [$slug]
+        );
+        if (!$post) { http_response_code(404); echo '404 Not Found'; return; }
+
+        $tags = DB::fetchAll(
+            "SELECT t.* FROM blog_tags t JOIN blog_post_tags pt ON pt.tag_id=t.id WHERE pt.post_id=?",
+            [$post['id']]
+        );
+
+        $prev = DB::fetch(
+            "SELECT slug, title FROM blog_posts WHERE status='published' AND published_at < ? ORDER BY published_at DESC LIMIT 1",
+            [$post['published_at']]
+        );
+        $next = DB::fetch(
+            "SELECT slug, title FROM blog_posts WHERE status='published' AND published_at > ? ORDER BY published_at ASC LIMIT 1",
+            [$post['published_at']]
+        );
+
+        Response::html(Template::render('blog_post', array_merge(self::getNavAndFooter(), [
+            'post_title'       => $post['title'],
+            'meta_description' => $post['meta_description'] ?? $post['excerpt'] ?? '',
+            'author_name'      => $post['author_name'] ?? '',
+            'published_at_fmt' => $post['published_at'] ? date('M j, Y', strtotime($post['published_at'])) : '',
+            'category_name'    => $post['category_name'] ?? '',
+            'category_slug'    => $post['category_slug'] ?? '',
+            'cover_url'        => $post['cover_url'] ?? '',
+            'og_image_url'     => $post['og_image_url'] ?? $post['cover_url'] ?? '',
+            'body_html'        => $post['body_html'] ?? '',
+            'tags'      => $tags,
+            'prev_post' => $prev ?: null,
+            'next_post' => $next ?: null,
+        ])));
+    }
+}
+
+class BlogAdminController {
+
+    private static function renderAdmin(string $template, array $data = []): void {
+        $user    = Auth::user();
+        $content = Template::render($template, $data);
+        Response::html(Template::render('admin_layout', array_merge($data, [
+            'content'       => $content,
+            'user_email'    => $user['email'] ?? '',
+            'user_role'     => $user['role'] ?? '',
+            'flash_error'   => Session::getFlash('error'),
+            'flash_success' => Session::getFlash('success'),
+            'csp_nonce'     => defined('CSP_NONCE') ? CSP_NONCE : '',
+            'is_blog'       => true,
+            'csrf_field'    => '<input type="hidden" name="_csrf" value="' . CSRF::token() . '">'
+        ])));
+    }
+
+    /** GET /admin/blog/posts */
+    public static function posts(): void {
+        Auth::require('*');
+        $status  = $_GET['status'] ?? null;
+        $where   = $status ? "WHERE p.status = ?" : "";
+        $params  = $status ? [$status] : [];
+
+        $posts = DB::fetchAll(
+            "SELECT p.*, c.name as category_name, u.email as author_name
+             FROM blog_posts p
+             LEFT JOIN blog_categories c ON c.id = p.category_id
+             LEFT JOIN users u ON u.id = p.author_id
+             $where ORDER BY p.created_at DESC",
+            $params
+        );
+        foreach ($posts as &$p) {
+            $p['published_at_fmt'] = $p['published_at'] ? date('M j, Y', strtotime($p['published_at'])) : '—';
+        }
+
+        self::renderAdmin('admin/blog_posts', [
+            'posts'            => $posts,
+            'total_posts'      => count($posts),
+            'filter_all'       => !$status,
+            'filter_published' => $status === 'published',
+            'filter_draft'     => $status === 'draft',
+        ]);
+    }
+
+    /** GET /admin/blog/posts/new */
+    public static function newPost(): void {
+        Auth::require('content.edit');
+        $cats    = DB::fetchAll("SELECT * FROM blog_categories ORDER BY name");
+        $allTags = DB::fetchAll("SELECT * FROM blog_tags ORDER BY name");
+        self::renderAdmin('admin/blog_post_edit', [
+            'categories'       => $cats,
+            'all_tags'         => $allTags,
+            'post_tags'        => [],
+            'status_draft'     => true,
+            'published_at_input' => date('Y-m-d\TH:i'),
+        ]);
+    }
+
+    /** GET /admin/blog/posts/{id}/edit */
+    public static function editPost(int $id): void {
+        Auth::require('content.edit');
+        $post = DB::fetch("SELECT * FROM blog_posts WHERE id = ?", [$id]);
+        if (!$post) { Response::redirect('/admin/blog/posts'); }
+
+        $cats     = DB::fetchAll("SELECT * FROM blog_categories ORDER BY name");
+        $allTags  = DB::fetchAll("SELECT * FROM blog_tags ORDER BY name");
+        $postTags = DB::fetchAll("SELECT t.* FROM blog_tags t JOIN blog_post_tags pt ON pt.tag_id=t.id WHERE pt.post_id=?", [$id]);
+        $cover    = $post['cover_asset_id'] ? DB::fetch("SELECT hash FROM assets WHERE id=?", [$post['cover_asset_id']]) : null;
+
+        $categoriesWithSelected = array_map(function($c) use ($post) {
+            $c['selected'] = ($c['id'] == $post['category_id']);
+            return $c;
+        }, $cats);
+
+        self::renderAdmin('admin/blog_post_edit', [
+            'post_id'            => $post['id'],
+            'post_title'         => $post['title'],
+            'post_slug'          => $post['slug'],
+            'post_excerpt'       => $post['excerpt'] ?? '',
+            'post_body'          => $post['body_html'] ?? '',
+            'meta_description'   => $post['meta_description'] ?? '',
+            'cover_url'          => $cover['hash'] ? '/assets/' . $cover['hash'] : '',
+            'cover_asset_id'     => $post['cover_asset_id'] ?? '',
+            'published_at_input' => $post['published_at'] ? date('Y-m-d\TH:i', strtotime($post['published_at'])) : date('Y-m-d\TH:i'),
+            'status_draft'       => $post['status'] === 'draft',
+            'status_published'   => $post['status'] === 'published',
+            'status_archived'    => $post['status'] === 'archived',
+            'categories'         => $categoriesWithSelected,
+            'all_tags'           => $allTags,
+            'post_tags'          => $postTags,
+        ]);
+    }
+
+    /** POST /admin/blog/posts/save */
+    public static function savePost(): void {
+        Auth::require('content.edit');
+        CSRF::require();
+
+        $id         = (int)($_POST['post_id'] ?? 0);
+        $title      = trim($_POST['title'] ?? '');
+        $slug       = trim($_POST['slug'] ?? '');
+        $excerpt    = trim($_POST['excerpt'] ?? '');
+        $bodyHtml   = $_POST['body_html'] ?? '';
+        $metaDesc   = trim($_POST['meta_description'] ?? '');
+        $status     = in_array($_POST['status'] ?? '', ['draft','published','archived']) ? $_POST['status'] : 'draft';
+        $catId      = (int)($_POST['category_id'] ?? 0) ?: null;
+        $coverId    = (int)($_POST['cover_asset_id'] ?? 0) ?: null;
+        $pubAt      = $_POST['published_at'] ?? null;
+        $tagIds     = array_filter(array_map('intval', (array)($_POST['tags'] ?? [])));
+
+        if (!$title) { Session::flash('error', 'Title is required.'); Response::redirect($id ? "/admin/blog/posts/{$id}/edit" : '/admin/blog/posts/new'); }
+
+        if (!$slug) $slug = strtolower(preg_replace('/[^a-z0-9]+/i', '-', $title));
+        $slug = strtolower(preg_replace('/[^a-z0-9-]/', '', $slug));
+
+        $pubAtDb = ($pubAt && $status === 'published') ? date('Y-m-d H:i:s', strtotime($pubAt)) : null;
+        if ($status === 'published' && !$pubAtDb) $pubAtDb = date('Y-m-d H:i:s');
+
+        $user = Auth::user();
+        $authorId = (int)($user['id'] ?? 1);
+
+        if ($id) {
+            DB::execute(
+                "UPDATE blog_posts SET title=?,slug=?,excerpt=?,body_html=?,meta_description=?,status=?,category_id=?,cover_asset_id=?,published_at=?,updated_at=datetime('now'),author_id=? WHERE id=?",
+                [$title,$slug,$excerpt,$bodyHtml,$metaDesc,$status,$catId,$coverId,$pubAtDb,$authorId,$id]
+            );
+            DB::execute("DELETE FROM blog_post_tags WHERE post_id=?", [$id]);
+        } else {
+            DB::execute(
+                "INSERT INTO blog_posts (title,slug,excerpt,body_html,meta_description,status,category_id,cover_asset_id,published_at,author_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [$title,$slug,$excerpt,$bodyHtml,$metaDesc,$status,$catId,$coverId,$pubAtDb,$authorId]
+            );
+            $id = (int)DB::lastInsertId();
+        }
+
+        foreach ($tagIds as $tagId) {
+            DB::execute("INSERT OR IGNORE INTO blog_post_tags (post_id,tag_id) VALUES (?,?)", [$id, $tagId]);
+        }
+
+        Cache::clear();
+        Session::flash('success', 'Post saved.');
+        Response::redirect("/admin/blog/posts/{$id}/edit");
+    }
+
+    /** POST /admin/blog/posts/{id}/delete */
+    public static function deletePost(int $id): void {
+        Auth::require('content.edit');
+        CSRF::require();
+        DB::execute("DELETE FROM blog_posts WHERE id=?", [$id]);
+        Cache::clear();
+        Session::flash('success', 'Post deleted.');
+        Response::redirect('/admin/blog/posts');
+    }
+
+    /** POST /admin/blog/posts/{id}/publish */
+    public static function publishPost(int $id): void {
+        Auth::require('content.edit');
+        CSRF::require();
+        DB::execute("UPDATE blog_posts SET status='published',published_at=COALESCE(published_at,datetime('now')) WHERE id=?", [$id]);
+        Session::flash('success', 'Post published.');
+        Response::redirect('/admin/blog/posts');
+    }
+
+    /** POST /admin/blog/posts/{id}/unpublish */
+    public static function unpublishPost(int $id): void {
+        Auth::require('content.edit');
+        CSRF::require();
+        DB::execute("UPDATE blog_posts SET status='draft' WHERE id=?", [$id]);
+        Session::flash('success', 'Post set to draft.');
+        Response::redirect('/admin/blog/posts');
+    }
+
+    /** GET /admin/blog/categories */
+    public static function categories(): void {
+        Auth::require('*');
+        $cats = DB::fetchAll(
+            "SELECT c.*, COUNT(p.id) as post_count
+             FROM blog_categories c
+             LEFT JOIN blog_posts p ON p.category_id=c.id
+             GROUP BY c.id ORDER BY c.name"
+        );
+        self::renderAdmin('admin/blog_categories', ['categories' => $cats]);
+    }
+
+    /** POST /admin/blog/categories/save */
+    public static function saveCategory(): void {
+        Auth::require('content.edit');
+        CSRF::require();
+        $id   = (int)($_POST['cat_id'] ?? 0) ?: null;
+        $name = trim($_POST['cat_name'] ?? '');
+        $desc = trim($_POST['cat_description'] ?? '');
+        if (!$name) { Session::flash('error', 'Name required.'); Response::redirect('/admin/blog/categories'); }
+
+        $slug = strtolower(preg_replace('/[^a-z0-9]+/i', '-', $name));
+        if ($id) {
+            DB::execute("UPDATE blog_categories SET name=?,slug=?,description=? WHERE id=?", [$name,$slug,$desc,$id]);
+        } else {
+            DB::execute("INSERT INTO blog_categories (name,slug,description) VALUES (?,?,?)", [$name,$slug,$desc]);
+        }
+        Session::flash('success', 'Category saved.');
+        Response::redirect('/admin/blog/categories');
+    }
+
+    /** POST /admin/blog/categories/{id}/delete */
+    public static function deleteCategory(int $id): void {
+        Auth::require('content.edit');
+        CSRF::require();
+        DB::execute("DELETE FROM blog_categories WHERE id=?", [$id]);
+        Session::flash('success', 'Category deleted.');
+        Response::redirect('/admin/blog/categories');
+    }
+}
+
+/** Simple tag API used by the post editor JS */
+class BlogTagAPI {
+    public static function create(): void {
+        Auth::require('content.edit');
+        $input = json_decode(file_get_contents('php://input'), true) ?? [];
+        $name  = trim($input['name'] ?? '');
+        if (!$name) { Response::json(['error' => 'Name required'], 400); return; }
+        $slug = strtolower(preg_replace('/[^a-z0-9]+/', '-', $name));
+        DB::execute("INSERT OR IGNORE INTO blog_tags (name,slug) VALUES (?,?)", [$name,$slug]);
+        $tag = DB::fetch("SELECT * FROM blog_tags WHERE slug=?", [$slug]);
+        Response::json($tag ?: ['error' => 'Failed'], $tag ? 200 : 500);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SECTION 15: CONTACT FORM
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -13568,6 +15630,8 @@ Router::post('/admin/media/{id}/delete', function ($id) { AdminController::delet
 // Theme Settings
 Router::get('/admin/theme', 'AdminController::theme');
 Router::post('/admin/theme', 'AdminController::saveTheme');
+Router::get('/admin/theme/kit', 'AdminController::themeKit');
+Router::post('/admin/theme/kit', 'AdminController::saveThemeKit');
 
 // Users Management
 Router::get('/admin/users', 'AdminController::users');
@@ -13580,9 +15644,13 @@ Router::post('/admin/users/{id}/delete', function ($id) { AdminController::delet
 Router::get('/admin/ai', 'AIController::form');
 Router::post('/admin/ai/configure', 'AIController::configure');
 Router::post('/admin/ai/generate', 'AIController::generate');
+Router::get('/admin/ai/chat', 'AIChatController::chat');
+Router::post('/api/ai/chat', 'AIChatController::send');
+Router::post('/api/ai/chat/reset', 'AIChatController::resetChat');
 
 // Approvals Queue
 Router::get('/admin/approvals', 'ApprovalController::queue');
+Router::post('/admin/approvals', 'ApprovalController::store');
 Router::get('/admin/approvals/{id}', function ($id) { ApprovalController::view((int)$id); });
 Router::get('/admin/approvals/{id}/preview', function ($id) { ApprovalController::preview((int)$id); });
 Router::post('/admin/approvals/{id}/approve', function ($id) { ApprovalController::approve((int)$id); });
@@ -13632,6 +15700,7 @@ Router::post('/api/blocks/{id}/update', function ($id) { BlockAPI::update((int)$
 Router::post('/api/blocks/{id}/move', function ($id) { BlockAPI::move((int)$id); });
 Router::post('/api/blocks/{id}/delete', function ($id) { BlockAPI::delete((int)$id); });
 Router::post('/api/blocks/create', 'BlockAPI::create');
+Router::get('/api/blocks/schema', 'BlockAPI::schema');
 
 // ─── THEME EDITING API ───────────────────────────────────────────────────────
 Router::get('/api/theme/header', 'ThemeAPI::getHeader');
@@ -13646,6 +15715,25 @@ Router::get('/api/media', 'MediaAPI::list');
 
 // ─── AI PAGE GENERATION API ──────────────────────────────────────────────────
 Router::post('/api/ai/generate-page', 'AIPageAPI::generate');
+Router::post('/api/ai/stream', 'AIOrchestrator::stream');
+
+// ─── BLOG (admin) ────────────────────────────────────────────────────────────
+Router::get('/admin/blog/posts', 'BlogAdminController::posts');
+Router::get('/admin/blog/posts/new', 'BlogAdminController::newPost');
+Router::get('/admin/blog/posts/{id}/edit', function ($id) { BlogAdminController::editPost((int)$id); });
+Router::post('/admin/blog/posts/save', 'BlogAdminController::savePost');
+Router::post('/admin/blog/posts/{id}/delete', function ($id) { BlogAdminController::deletePost((int)$id); });
+Router::post('/admin/blog/posts/{id}/publish', function ($id) { BlogAdminController::publishPost((int)$id); });
+Router::post('/admin/blog/posts/{id}/unpublish', function ($id) { BlogAdminController::unpublishPost((int)$id); });
+Router::get('/admin/blog/categories', 'BlogAdminController::categories');
+Router::post('/admin/blog/categories/save', 'BlogAdminController::saveCategory');
+Router::post('/admin/blog/categories/{id}/delete', function ($id) { BlogAdminController::deleteCategory((int)$id); });
+Router::post('/api/blog/tags', 'BlogTagAPI::create');
+
+// ─── BLOG (public) ───────────────────────────────────────────────────────────
+Router::get('/blog', 'BlogController::index');
+Router::get('/blog/category/{slug}', function ($slug) { BlogController::category($slug); });
+Router::get('/blog/{slug}', function ($slug) { BlogController::post($slug); });
 
 // ─── CONTACT FORM ────────────────────────────────────────────────────────────
 Router::post('/contact', 'FormController::contact');
