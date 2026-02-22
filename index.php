@@ -45,6 +45,9 @@ if ($isProduction) {
     ini_set('display_errors', '1');
 }
 
+// Buffer all output so PHP warnings/notices never corrupt JSON API responses
+ob_start();
+
 // Dev mode: disable all caching at the HTTP level
 if (ONECMS_DEV) {
     header('Cache-Control: no-store, no-cache, must-revalidate');
@@ -932,8 +935,8 @@ class Request {
 
 class Response {
     public static function json(array $data, int $code = 200): void {
-        // Discard any PHP notices/warnings that were written before this call
-        if (ob_get_level()) { ob_end_clean(); }
+        // Discard any PHP notices/warnings buffered before this call
+        while (ob_get_level() > 0) { ob_end_clean(); }
         http_response_code($code);
         header('Content-Type: application/json');
         echo json_encode($data);
@@ -4627,7 +4630,7 @@ HTML,
                 <select name="ai_provider" required 
                         class="cms-input">
                     <option value="openai" {{#if current_provider_openai}}selected{{/if}}>OpenAI (GPT-5.2)</option>
-                    <option value="anthropic" {{#if current_provider_anthropic}}selected{{/if}}>Anthropic (Claude 4.5)</option>
+                    <option value="anthropic" {{#if current_provider_anthropic}}selected{{/if}}>Anthropic (Claude 4.6)</option>
                     <option value="google" {{#if current_provider_google}}selected{{/if}}>Google (Gemini 3)</option>
                 </select>
             </div>
@@ -5049,7 +5052,7 @@ document.getElementById('hide-config-btn')?.addEventListener('click', function()
                     class="cms-input">
                 <option value="">Select a provider...</option>
                 <option value="openai" {{#if current_provider_openai}}selected{{/if}}>OpenAI (GPT-5.2, GPT-4.1)</option>
-                <option value="anthropic" {{#if current_provider_anthropic}}selected{{/if}}>Anthropic (Claude 4.5)</option>
+                <option value="anthropic" {{#if current_provider_anthropic}}selected{{/if}}>Anthropic (Claude 4.6)</option>
                 <option value="google" {{#if current_provider_google}}selected{{/if}}>Google (Gemini 3)</option>
             </select>
         </div>
@@ -5073,7 +5076,7 @@ document.getElementById('hide-config-btn')?.addEventListener('click', function()
                    placeholder="gpt-5.2 (default for OpenAI)"
                    class="cms-input">
             <p class="cms-hint">
-                OpenAI: gpt-5.2, gpt-5-mini, gpt-4.1 | Anthropic: claude-sonnet-4-5, claude-opus-4-5 | Google: gemini-3-flash-preview, gemini-3-pro-preview
+                OpenAI: gpt-5.2, gpt-5-mini, gpt-4.1 | Anthropic: claude-sonnet-4-6, claude-opus-4-5 | Google: gemini-3-flash-preview, gemini-3-pro-preview
             </p>
         </div>
         
@@ -13162,30 +13165,44 @@ class AI {
         return $text ?? 'Sorry, I could not get a response. Please try again.';
     }
 
+    /** Shared HTTP POST helper — works without the curl extension */
+    private static function httpPost(string $url, array $headers, array $payload, int $timeout = 120): array {
+        $body = json_encode($payload);
+        $headerLines = array_map(fn($k, $v) => "$k: $v", array_keys($headers), $headers);
+        $ctx = stream_context_create(['http' => [
+            'method'        => 'POST',
+            'header'        => implode("\r\n", $headerLines),
+            'content'       => $body,
+            'timeout'       => $timeout,
+            'ignore_errors' => true,   // get body even on 4xx/5xx
+        ], 'ssl' => ['verify_peer' => true, 'verify_peer_name' => true]]);
+        $response = @file_get_contents($url, false, $ctx);
+        // Parse HTTP status from $http_response_header
+        $code = 200;
+        foreach ($http_response_header ?? [] as $h) {
+            if (preg_match('#^HTTP/\S+\s+(\d+)#', $h, $m)) { $code = (int)$m[1]; }
+        }
+        return ['code' => $code, 'body' => $response];
+    }
+
     private static function openaiChatRequest(array $messages, string $system, array $config): ?string {
         $payload = ['model' => $config['model'], 'temperature' => 0.8, 'max_tokens' => 1024,
             'messages' => array_merge($system ? [['role' => 'system', 'content' => $system]] : [], $messages)];
-        $ch = curl_init('https://api.openai.com/v1/chat/completions');
-        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_TIMEOUT => 60,
-            CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Authorization: Bearer ' . $config['api_key']],
-            CURLOPT_POSTFIELDS => json_encode($payload)]);
-        $res = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
-        if ($code !== 200) return null;
-        $data = json_decode($res, true);
+        $r = self::httpPost('https://api.openai.com/v1/chat/completions',
+            ['Content-Type' => 'application/json', 'Authorization' => 'Bearer ' . $config['api_key']], $payload);
+        if ($r['code'] !== 200) return null;
+        $data = json_decode($r['body'], true);
         return $data['choices'][0]['message']['content'] ?? null;
     }
 
     private static function anthropicChatRequest(array $messages, string $system, array $config): ?string {
         $model = $config['model'];
-        if (!str_starts_with($model, 'claude')) $model = 'claude-sonnet-4-5';
+        if (!str_starts_with($model, 'claude')) $model = 'claude-sonnet-4-6';
         $payload = ['model' => $model, 'max_tokens' => 1024, 'messages' => $messages];
         if ($system) $payload['system'] = $system;
-        $ch = curl_init('https://api.anthropic.com/v1/messages');
-        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_TIMEOUT => 60,
-            CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'X-API-Key: ' . $config['api_key'], 'anthropic-version: 2023-06-01'],
-            CURLOPT_POSTFIELDS => json_encode($payload)]);
-        $res = curl_exec($ch); curl_close($ch);
-        $data = json_decode($res, true);
+        $r = self::httpPost('https://api.anthropic.com/v1/messages',
+            ['Content-Type' => 'application/json', 'X-API-Key' => $config['api_key'], 'anthropic-version' => '2023-06-01'], $payload);
+        $data = json_decode($r['body'], true);
         return $data['content'][0]['text'] ?? null;
     }
 
@@ -13197,11 +13214,8 @@ class AI {
         foreach ($messages as $m) $parts[] = ['text' => ($m['role'] === 'user' ? 'User: ' : 'Assistant: ') . $m['content'] . "\n"];
         $payload = ['contents' => [['parts' => $parts]], 'generationConfig' => ['maxOutputTokens' => 1024, 'temperature' => 0.8]];
         $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key=" . $config['api_key'];
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_TIMEOUT => 60,
-            CURLOPT_HTTPHEADER => ['Content-Type: application/json'], CURLOPT_POSTFIELDS => json_encode($payload)]);
-        $res = curl_exec($ch); curl_close($ch);
-        $data = json_decode($res, true);
+        $r = self::httpPost($url, ['Content-Type' => 'application/json'], $payload);
+        $data = json_decode($r['body'], true);
         return $data['candidates'][0]['content']['parts'][0]['text'] ?? null;
     }
 
@@ -13252,8 +13266,6 @@ class AI {
      * Make a request to OpenAI API
      */
     private static function openaiRequest(string $prompt, array $config): ?string {
-        $ch = curl_init('https://api.openai.com/v1/chat/completions');
-        
         $payload = [
             'model' => $config['model'],
             'messages' => [
@@ -13263,29 +13275,14 @@ class AI {
             'temperature' => 0.7,
             'max_tokens' => 4096
         ];
-        
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST => true,
-            CURLOPT_TIMEOUT => 120,
-            CURLOPT_HTTPHEADER => [
-                'Content-Type: application/json',
-                'Authorization: Bearer ' . $config['api_key']
-            ],
-            CURLOPT_POSTFIELDS => json_encode($payload)
-        ]);
-        
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-        
-        if ($error || $httpCode !== 200) {
-            error_log("OpenAI API error: HTTP $httpCode - $error - $response");
+        $r = self::httpPost('https://api.openai.com/v1/chat/completions',
+            ['Content-Type' => 'application/json', 'Authorization' => 'Bearer ' . $config['api_key']],
+            $payload, 120);
+        if ($r['code'] !== 200) {
+            error_log('OpenAI API error: HTTP ' . $r['code'] . ' - ' . $r['body']);
             return null;
         }
-        
-        $data = json_decode($response, true);
+        $data = json_decode($r['body'], true);
         return $data['choices'][0]['message']['content'] ?? null;
     }
     
@@ -13295,43 +13292,22 @@ class AI {
     private static function anthropicRequest(string $prompt, array $config): ?string {
         $model = $config['model'];
         if (str_starts_with($model, 'gpt') || str_starts_with($model, 'gemini')) {
-            $model = 'claude-sonnet-4-5'; // Default Claude model
+            $model = 'claude-sonnet-4-6';
         }
-        
-        $ch = curl_init('https://api.anthropic.com/v1/messages');
-        
         $payload = [
-            'model' => $model,
+            'model'      => $model,
             'max_tokens' => 4096,
-            'system' => self::getSystemPrompt(),
-            'messages' => [
-                ['role' => 'user', 'content' => $prompt]
-            ]
+            'system'     => self::getSystemPrompt(),
+            'messages'   => [['role' => 'user', 'content' => $prompt]]
         ];
-        
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST => true,
-            CURLOPT_TIMEOUT => 120,
-            CURLOPT_HTTPHEADER => [
-                'Content-Type: application/json',
-                'x-api-key: ' . $config['api_key'],
-                'anthropic-version: 2023-06-01'
-            ],
-            CURLOPT_POSTFIELDS => json_encode($payload)
-        ]);
-        
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-        
-        if ($error || $httpCode !== 200) {
-            error_log("Anthropic API error: HTTP $httpCode - $error - $response");
+        $r = self::httpPost('https://api.anthropic.com/v1/messages',
+            ['Content-Type' => 'application/json', 'x-api-key' => $config['api_key'], 'anthropic-version' => '2023-06-01'],
+            $payload, 120);
+        if ($r['code'] !== 200) {
+            error_log('Anthropic API error: HTTP ' . $r['code'] . ' - ' . $r['body']);
             return null;
         }
-        
-        $data = json_decode($response, true);
+        $data = json_decode($r['body'], true);
         return $data['content'][0]['text'] ?? null;
     }
     
@@ -13341,66 +13317,21 @@ class AI {
     private static function googleRequest(string $prompt, array $config): ?string {
         $model = $config['model'];
         if (str_starts_with($model, 'gpt') || str_starts_with($model, 'claude')) {
-            $model = 'gemini-3-flash-preview'; // Default Gemini model
+            $model = 'gemini-3-flash-preview';
         }
-        
         $url = 'https://generativelanguage.googleapis.com/v1beta/models/' . $model . ':generateContent?key=' . $config['api_key'];
-        
-        $ch = curl_init($url);
-        
         $payload = [
-            'contents' => [
-                [
-                    'parts' => [
-                        ['text' => self::getSystemPrompt() . "\n\n" . $prompt]
-                    ]
-                ]
-            ],
-            'generationConfig' => [
-                'temperature' => 0.7,
-                'maxOutputTokens' => 8192
-            ]
+            'contents' => [['parts' => [['text' => self::getSystemPrompt() . "\n\n" . $prompt]]]],
+            'generationConfig' => ['temperature' => 0.7, 'maxOutputTokens' => 8192]
         ];
-        
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST => true,
-            CURLOPT_TIMEOUT => 120,
-            CURLOPT_HTTPHEADER => [
-                'Content-Type: application/json'
-            ],
-            CURLOPT_POSTFIELDS => json_encode($payload)
-        ]);
-        
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-        
-        if ($error) {
-            error_log("Google Gemini API curl error: $error");
+        $r = self::httpPost($url, ['Content-Type' => 'application/json'], $payload, 120);
+        if ($r['code'] !== 200) {
+            error_log('Google Gemini API error: HTTP ' . $r['code'] . ' - ' . $r['body']);
             return null;
         }
-        
-        if ($httpCode !== 200) {
-            error_log("Google Gemini API error: HTTP $httpCode - Response: $response");
-            return null;
-        }
-        
-        $data = json_decode($response, true);
-        
-        if (!$data) {
-            error_log("Google Gemini API error: Failed to parse JSON response");
-            return null;
-        }
-        
+        $data = json_decode($r['body'], true);
         $text = $data['candidates'][0]['content']['parts'][0]['text'] ?? null;
-        
-        if (!$text) {
-            error_log("Google Gemini API error: No text in response - " . json_encode($data));
-            return null;
-        }
-        
+        if (!$text) { error_log('Google Gemini API: no text in response - ' . $r['body']); }
         return $text;
     }
     
@@ -13928,7 +13859,7 @@ class AIController {
         } else {
             // Set default model based on provider
             $defaultModel = match($provider) {
-                'anthropic' => 'claude-sonnet-4-5',
+                'anthropic' => 'claude-sonnet-4-6',
                 'google' => 'gemini-3-flash-preview',
                 default => 'gpt-5.2'
             };
