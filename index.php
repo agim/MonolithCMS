@@ -4586,7 +4586,7 @@ HTML,
 <div class="cms-page-header">
     <div>
         <h1 class="cms-page-title">AI Site Generator</h1>
-        <p class="cms-page-subtitle">Let AI create a complete website for you based on your business information.</p>
+        <p class="cms-page-subtitle">Describe your vision and the AI will design a fully custom website — no templates, no constraints.</p>
     </div>
 </div>
 
@@ -4673,162 +4673,104 @@ document.getElementById('hide-config-btn')?.addEventListener('click', function()
 
 <form method="post" action="/admin/ai/generate" class="space-y-6" id="ai-generate-form">
     {{{csrf_field}}}
-    
-    <!-- Business Information -->
+
+    <!-- Your Project -->
     <div class="cms-card">
         <h2 class="cms-card-header">
-            <span class="material-symbols-outlined text-[#135bec]">business</span>
-            Business Information
+            <span class="material-symbols-outlined text-[#135bec]">edit_note</span>
+            Your Project
         </h2>
-        
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="space-y-4">
             <div>
-                <label class="cms-label">Business Name *</label>
-                <input type="text" name="business_name" required 
-                       placeholder="e.g., Acme Consulting"
+                <label class="cms-label">Project or business name *</label>
+                <input type="text" name="business_name" required
+                       placeholder="e.g., Luminary Studio, Peak Performance Coaching, The Corner Bakery"
                        class="cms-input">
             </div>
-            
             <div>
-                <label class="cms-label">Industry *</label>
-                <select name="industry" required 
-                        class="cms-input">
-                    <option value="">Select an industry...</option>
-                    {{#each industries}}
-                    <option value="{{this}}">{{this}}</option>
-                    {{/each}}
-                </select>
+                <label class="cms-label">Tell us about it — what it is, who it's for, and what makes it special *</label>
+                <textarea name="description" rows="5" required
+                          placeholder="Be as specific as you like. The more you share, the more tailored your site will be. For example: 'We're a boutique architecture firm specialising in passive-house residential design for eco-conscious families in the Pacific Northwest. We believe great homes should be beautiful, efficient, and built to last generations.'"
+                          class="cms-input"></textarea>
+                <p class="cms-hint">This is the most important field — it drives the AI's entire creative direction.</p>
+            </div>
+            <div>
+                <label class="cms-label">Who are your visitors and what do they care about?</label>
+                <input type="text" name="target_audience"
+                       placeholder="e.g., First-time homeowners aged 30–50 who care about sustainability and quality craftsmanship"
+                       class="cms-input">
             </div>
         </div>
-        
-        <div class="mt-4">
-            <label class="cms-label">Business Description *</label>
-            <textarea name="description" rows="4" required 
-                      placeholder="Describe your business, services, products, target audience, and what makes you unique..."
-                      class="cms-input"></textarea>
-        </div>
     </div>
-    
-    <!-- Style Preferences -->
+
+    <!-- Vision & Style -->
     <div class="cms-card">
         <h2 class="cms-card-header">
             <span class="material-symbols-outlined text-[#135bec]">palette</span>
-            Style Preferences
+            Vision &amp; Style
         </h2>
-        
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-                <label class="cms-label">Tone</label>
-                <select name="tone" 
-                        class="cms-input">
-                    {{#each tones}}
-                    <option value="{{@key}}">{{@key}} - {{this}}</option>
-                    {{/each}}
-                </select>
-            </div>
-            
-            <div>
-                <label class="cms-label">Color Preference</label>
-                <input type="text" name="color_preference" 
-                       placeholder="e.g., Blue and green, Modern dark theme"
-                       class="cms-input">
-            </div>
-            
-            <div>
-                <label class="cms-label">UI Theme</label>
-                <select name="ui_theme" 
-                        class="cms-input">
-                    <optgroup label="Light Themes">
-                        <option value="light">Light - Clean & minimal</option>
-                        <option value="cupcake">Cupcake - Soft & pastel</option>
-                        <option value="bumblebee">Bumblebee - Warm yellow</option>
-                        <option value="emerald">Emerald - Fresh green</option>
-                        <option value="corporate">Corporate - Professional blue</option>
-                        <option value="garden">Garden - Natural tones</option>
-                        <option value="lofi">Lo-Fi - Subtle gray</option>
-                        <option value="pastel">Pastel - Soft colors</option>
-                        <option value="fantasy">Fantasy - Vibrant purple</option>
-                        <option value="wireframe">Wireframe - Sketch style</option>
-                        <option value="cmyk">CMYK - Print inspired</option>
-                        <option value="autumn">Autumn - Warm orange</option>
-                        <option value="acid">Acid - Neon lime</option>
-                        <option value="lemonade">Lemonade - Bright yellow</option>
-                        <option value="winter">Winter - Cool & icy</option>
-                    </optgroup>
-                    <optgroup label="Dark Themes">
-                        <option value="dark">Dark - Modern dark</option>
-                        <option value="synthwave">Synthwave - Retro neon</option>
-                        <option value="retro">Retro - 70s vintage</option>
-                        <option value="cyberpunk">Cyberpunk - Futuristic</option>
-                        <option value="valentine">Valentine - Pink love</option>
-                        <option value="halloween">Halloween - Spooky</option>
-                        <option value="forest">Forest - Deep green</option>
-                        <option value="aqua">Aqua - Ocean blue</option>
-                        <option value="luxury">Luxury - Gold & black</option>
-                        <option value="dracula">Dracula - Dark purple</option>
-                        <option value="business">Business - Serious dark</option>
-                        <option value="night">Night - Deep blue</option>
-                        <option value="coffee">Coffee - Warm brown</option>
-                    </optgroup>
-                </select>
-                <p class="cms-hint">Choose a pre-built theme or let colors be auto-generated</p>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Features -->
-    <div class="cms-card">
-        <h2 class="cms-card-header">
-            <span class="material-symbols-outlined text-[#135bec]">widgets</span>
-            Features to Include
-        </h2>
-        
-        <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
-            {{#each features}}
-            <label class="flex items-center gap-2 p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 transition-colors">
-                <input type="checkbox" name="features[]" value="{{@key}}" 
-                       class="w-4 h-4 text-[#135bec] border-gray-300 rounded focus:ring-[#135bec]">
-                <span class="text-sm text-gray-700">{{this}}</span>
-            </label>
-            {{/each}}
-        </div>
-    </div>
-    
-    <!-- Additional Information -->
-    <div class="cms-card">
-        <h2 class="cms-card-header">
-            <span class="material-symbols-outlined text-[#135bec]">info</span>
-            Additional Information
-        </h2>
-        
         <div class="space-y-4">
             <div>
-                <label class="cms-label">Specific Pages Needed</label>
-                <input type="text" name="pages_needed" 
-                       placeholder="e.g., Home, About, Services, Portfolio, Contact"
+                <label class="cms-label">How should the site feel? Describe the visual personality</label>
+                <input type="text" name="visual_style"
+                       placeholder="e.g., Warm and handcrafted · Bold and energetic · Clean and minimal · Dark and sophisticated · Bright and playful"
+                       class="cms-input">
+                <p class="cms-hint">Use your own words — the AI will interpret your intent creatively.</p>
+            </div>
+            <div>
+                <label class="cms-label">Any color direction in mind?</label>
+                <input type="text" name="color_preference"
+                       placeholder="e.g., Deep forest greens with gold accents · Monochrome with a single pop of coral · Whatever feels right for a law firm"
                        class="cms-input">
             </div>
-            
             <div>
-                <label class="cms-label">Your Content</label>
-                <textarea name="user_content" rows="5" 
-                          placeholder="Paste any existing content, mission statement, service descriptions, or text you want included..."
+                <label class="cms-label">Any websites or brands you admire, or want to look different from?</label>
+                <input type="text" name="design_inspiration"
+                       placeholder="e.g., Linear.app for the clean aesthetic, but warmer · Nothing like typical corporate consultant sites"
+                       class="cms-input">
+            </div>
+        </div>
+    </div>
+
+    <!-- Content & Structure -->
+    <div class="cms-card">
+        <h2 class="cms-card-header">
+            <span class="material-symbols-outlined text-[#135bec]">view_quilt</span>
+            Content &amp; Structure
+        </h2>
+        <div class="space-y-4">
+            <div>
+                <label class="cms-label">What pages do you need?</label>
+                <input type="text" name="pages_needed"
+                       placeholder="e.g., Home, Services, About us, Case studies, Contact · or just: Home + Contact and let AI decide the rest"
+                       class="cms-input">
+            </div>
+            <div>
+                <label class="cms-label">Any specific features or sections?</label>
+                <input type="text" name="features"
+                       placeholder="e.g., A team section, pricing table, FAQ, portfolio gallery, newsletter signup, contact form"
+                       class="cms-input">
+            </div>
+            <div>
+                <label class="cms-label">Paste any existing content to include</label>
+                <textarea name="user_content" rows="5"
+                          placeholder="Mission statement, service descriptions, bios, taglines, copy you've already written — anything you want the AI to use or build on."
                           class="cms-input"></textarea>
             </div>
         </div>
     </div>
-    
+
     <!-- Actions -->
     <div class="flex items-center gap-3">
-        <button type="submit" id="ai-generate-btn"
-                class="cms-btn">
+        <button type="submit" id="ai-generate-btn" class="cms-btn">
             <span class="material-symbols-outlined text-xl">auto_awesome</span>
-            Generate Site Plan
+            Generate My Site
         </button>
-        <a href="/admin" 
-           class="cms-btn-ghost">
-            Cancel
+        <a href="/admin/ai/chat" class="cms-btn-ghost">
+            <span class="material-symbols-outlined text-xl">chat</span>
+            Use chat wizard instead
         </a>
+        <a href="/admin" class="cms-btn-ghost">Cancel</a>
     </div>
 </form>
 
@@ -13369,192 +13311,78 @@ class AI {
      */
     private static function getSystemPrompt(): string {
         return <<<'PROMPT'
-You are an expert website builder AI that creates stunning, modern designs like professional UI tools (similar to Banani, Framer, Webflow). Generate visually sophisticated, well-structured websites.
+You are a creative web design AI. You build fully custom, unique websites tailored to each client's specific vision — no templates, no presets. Every design decision is driven by what's right for this particular site.
 
-IMPORTANT: Respond ONLY with valid JSON. Do not include any explanation or markdown formatting.
+IMPORTANT: Respond ONLY with valid JSON. No explanation, no markdown.
 
-Your output must be valid JSON with this exact structure:
+Output structure:
 {
-  "site_name": "Business Name",
-  "tagline": "A catchy tagline for the business",
+  "site_name": "...",
+  "tagline": "...",
   "colors": {
-    "primary": "#2563eb",
-    "secondary": "#1e40af",
-    "accent": "#0ea5e9",
-    "background": "#ffffff",
-    "text": "#1e293b",
-    "header_bg": "#0f172a",
-    "header_text": "#f8fafc",
-    "footer_bg": "#1e293b",
-    "footer_text": "#f1f5f9",
-    "cta_bg": "#2563eb",
-    "cta_text": "#ffffff"
+    "primary": "#hex",
+    "secondary": "#hex",
+    "accent": "#hex",
+    "background": "#hex",
+    "text": "#hex",
+    "header_bg": "#hex",
+    "header_text": "#hex",
+    "footer_bg": "#hex",
+    "footer_text": "#hex",
+    "cta_bg": "#hex",
+    "cta_text": "#hex"
   },
   "pages": [
     {
       "slug": "home",
       "title": "Home",
-      "meta_description": "Welcome to Business Name - brief description",
-      "blocks": [...]
+      "meta_description": "...",
+      "blocks": []
     }
   ],
-  "nav": [
-    {"label": "Home", "url": "/"},
-    {"label": "About", "url": "/about"},
-    {"label": "Contact", "url": "/contact"}
-  ],
+  "nav": [{"label": "Home", "url": "/"}],
   "footer": {
-    "text": "© 2025 Business Name. All rights reserved.",
-    "links": [{"label": "Privacy Policy", "url": "/privacy"}],
-    "social": [{"platform": "twitter", "url": "https://twitter.com/"}]
+    "text": "© 2025 Site Name.",
+    "links": [],
+    "social": []
   }
 }
 
-═══════════════════════════════════════════════════════════════════════════════
-AVAILABLE BLOCK TYPES - Use these to create professional, visually rich layouts
-═══════════════════════════════════════════════════════════════════════════════
+AVAILABLE BLOCK TYPES — choose any combination that serves the design:
 
-1. HERO - Main page banner (gradient background, centered text)
-   {"type": "hero", "content": {"title": "Main Heading", "subtitle": "Supporting text", "button": "Get Started", "url": "/contact"}}
+hero          {"type":"hero","content":{"title":"...","subtitle":"...","button":"...","url":"..."}}
+text          {"type":"text","content":{"content":"<p>HTML content</p>"}}
+features      {"type":"features","content":{"title":"...","subtitle":"...","items":[{"icon":"bolt","title":"...","description":"..."}],"columns":3}}
+cards         {"type":"cards","content":{"title":"...","items":[{"icon":"...","title":"...","description":"...","button":"...","url":"..."}]}}
+stats         {"type":"stats","content":{"title":"...","items":[{"value":"...","label":"...","icon":"..."}]}}
+testimonials  {"type":"testimonials","content":{"title":"...","items":[{"quote":"...","author":"...","role":"...","rating":5}]}}
+pricing       {"type":"pricing","content":{"title":"...","plans":[{"name":"...","price":"...","period":"...","features":[],"button":"...","url":"...","featured":false}]}}
+team          {"type":"team","content":{"title":"...","subtitle":"...","members":[{"name":"...","role":"...","bio":"...","photo":""}]}}
+faq           {"type":"faq","content":{"title":"...","items":[{"question":"...","answer":"..."}]}}
+cta           {"type":"cta","content":{"title":"...","text":"...","button":"...","url":"..."}}
+form          {"type":"form","content":{"title":"...","fields":[{"type":"text","label":"Name","required":true},{"type":"email","label":"Email"},{"type":"textarea","label":"Message"}],"button":"Send"}}
+quote         {"type":"quote","content":{"text":"...","author":"...","role":"..."}}
+gallery       {"type":"gallery","content":{"title":"...","images":[{"url":"/img.jpg","alt":"..."}],"columns":3}}
+timeline      {"type":"timeline","content":{"title":"...","items":[{"date":"...","title":"...","description":"..."}]}}
+steps         {"type":"steps","content":{"title":"...","items":[{"number":1,"title":"...","description":"..."}]}}
+checklist     {"type":"checklist","content":{"title":"...","items":["...","..."]}}
+newsletter    {"type":"newsletter","content":{"title":"...","text":"...","button":"...","placeholder":"..."}}
+contact_info  {"type":"contact_info","content":{"items":[{"icon":"mail","label":"Email","value":"...","url":"mailto:..."}]}}
+logo_cloud    {"type":"logo_cloud","content":{"title":"...","logos":[{"name":"...","url":""}]}}
+comparison    {"type":"comparison","content":{"title":"...","headers":["Feature","Basic","Pro"],"rows":[["Storage","10GB","100GB"]]}}
+tabs          {"type":"tabs","content":{"items":[{"label":"...","content":"<p>...</p>"}]}}
+accordion     {"type":"accordion","content":{"title":"...","items":[{"title":"...","content":"<p>...</p>"}]}}
+image         {"type":"image","content":{"url":"/img.jpg","alt":"...","caption":"..."}}
+columns       {"type":"columns","content":{"columns":[{"content":"<p>Col 1</p>"},{"content":"<p>Col 2</p>"}]}}
+social        {"type":"social","content":{"title":"...","links":[{"platform":"twitter","url":"#"}]}}
 
-2. TEXT - Rich text content 
-   {"type": "text", "content": {"content": "<p>HTML content here...</p>"}}
-
-3. CTA - Call-to-action section (gradient background)
-   {"type": "cta", "content": {"title": "Call to Action", "text": "Description", "button": "Learn More", "url": "/about"}}
-
-4. FEATURES - Grid of feature cards with icons (great for services/benefits)
-   {"type": "features", "content": {"items": [
-     {"icon": "⚡", "title": "Fast Performance", "description": "Lightning quick load times"},
-     {"icon": "🔒", "title": "Secure", "description": "Enterprise-grade security"},
-     {"icon": "📱", "title": "Responsive", "description": "Works on all devices"}
-   ]}}
-
-5. STATS - Impressive numbers section (great for social proof)
-   {"type": "stats", "content": {"items": [
-     {"value": "10K+", "label": "Happy Customers"},
-     {"value": "99%", "label": "Satisfaction Rate"},
-     {"value": "24/7", "label": "Support Available"}
-   ]}}
-
-6. TESTIMONIALS - Customer testimonial cards with avatars
-   {"type": "testimonials", "content": {"items": [
-     {"quote": "This product transformed our business!", "name": "Sarah Johnson", "role": "CEO, TechCorp"},
-     {"quote": "Best decision we ever made.", "name": "Mike Chen", "role": "Founder, StartupXYZ"}
-   ]}}
-
-7. PRICING - Pricing table with tiers (set featured:true for highlighted tier)
-   {"type": "pricing", "content": {"items": [
-     {"name": "Starter", "price": "$9", "period": "/month", "features": ["5 Projects", "Basic Support", "1GB Storage"], "button": "Start Free", "url": "/signup"},
-     {"name": "Pro", "price": "$29", "period": "/month", "features": ["Unlimited Projects", "Priority Support", "100GB Storage", "API Access"], "button": "Get Pro", "url": "/signup", "featured": true},
-     {"name": "Enterprise", "price": "$99", "period": "/month", "features": ["Everything in Pro", "Dedicated Support", "Custom Integrations"], "button": "Contact Us", "url": "/contact"}
-   ]}}
-
-8. TEAM - Team member cards with photos
-   {"type": "team", "content": {"items": [
-     {"name": "Jane Smith", "role": "CEO & Founder", "bio": "15+ years in tech leadership", "photo": ""},
-     {"name": "John Doe", "role": "CTO", "bio": "Former Google engineer", "photo": ""}
-   ]}}
-
-9. CARDS - Generic card grid (for services, portfolio, blog posts)
-   {"type": "cards", "content": {"items": [
-     {"title": "Web Development", "description": "Custom websites built with modern tech", "image": "", "button": "Learn More", "url": "/services/web"},
-     {"title": "Mobile Apps", "description": "Native iOS and Android applications", "image": "", "button": "Learn More", "url": "/services/mobile"}
-   ]}}
-
-10. FAQ - Frequently asked questions
-    {"type": "faq", "content": {"items": [
-      {"question": "How does your service work?", "answer": "We provide end-to-end solutions..."},
-      {"question": "What's your refund policy?", "answer": "30-day money back guarantee..."}
-    ]}}
-
-11. GALLERY - Image gallery grid
-    {"type": "gallery", "content": {"items": [{"url": "/assets/img1.jpg", "alt": "Project 1"}], "columns": 3}}
-
-12. FORM - Contact form (no content needed)
-    {"type": "form", "content": {}}
-
-13. IMAGE - Single image with caption
-    {"type": "image", "content": {"url": "/assets/photo.jpg", "alt": "Description", "caption": "Optional caption"}}
-
-═══════════════════════════════════════════════════════════════════════════════
-PAGE LAYOUT BEST PRACTICES - Create professional, conversion-focused designs
-═══════════════════════════════════════════════════════════════════════════════
-
-HOME PAGE STRUCTURE (typical SaaS/Business):
-1. Hero - Bold headline with CTA button
-2. Features - 3-4 key benefits/features
-3. Stats - Impressive numbers (optional)
-4. Testimonials - Social proof
-5. CTA - Final call to action
-
-ABOUT PAGE STRUCTURE:
-1. Hero - Company story headline
-2. Text - Mission/vision statement
-3. Team - Key team members
-4. Stats - Company achievements
-
-PRICING PAGE STRUCTURE:
-1. Hero - "Simple, Transparent Pricing"
-2. Pricing - 2-3 pricing tiers
-3. FAQ - Common pricing questions
-4. CTA - "Start your free trial"
-
-SERVICES PAGE STRUCTURE:
-1. Hero - Services overview
-2. Features - Key service offerings
-3. Cards - Individual services detail
-4. CTA - "Get a quote"
-
-CONTACT PAGE STRUCTURE:
-1. Hero - "Get in Touch"
-2. Text - Contact info, hours
-3. Form - Contact form
-
-═══════════════════════════════════════════════════════════════════════════════
-COLOR PALETTE GUIDELINES - CRITICAL
-═══════════════════════════════════════════════════════════════════════════════
-
-Select ONE of these pre-designed, harmonious palettes. Do NOT mix colors from different palettes.
-
-PALETTE 1 - Ocean Blue (Professional/Corporate):
-  primary: #2563eb, secondary: #1e40af, accent: #0ea5e9, background: #ffffff, text: #1e293b
-  header_bg: #0f172a, header_text: #f8fafc, footer_bg: #1e293b, footer_text: #f1f5f9, cta_bg: #2563eb, cta_text: #ffffff
-
-PALETTE 2 - Forest Green (Natural/Health/Eco):
-  primary: #059669, secondary: #047857, accent: #34d399, background: #ffffff, text: #1e293b
-  header_bg: #064e3b, header_text: #f0fdf4, footer_bg: #1e293b, footer_text: #f1f5f9, cta_bg: #059669, cta_text: #ffffff
-
-PALETTE 3 - Warm Orange (Creative/Food/Energy):
-  primary: #ea580c, secondary: #c2410c, accent: #fb923c, background: #fffbeb, text: #1c1917
-  header_bg: #1c1917, header_text: #fef3c7, footer_bg: #1c1917, footer_text: #fef3c7, cta_bg: #ea580c, cta_text: #ffffff
-
-PALETTE 4 - Elegant Slate (Law/Finance/Luxury):
-  primary: #475569, secondary: #334155, accent: #64748b, background: #f8fafc, text: #0f172a
-  header_bg: #0f172a, header_text: #f8fafc, footer_bg: #1e293b, footer_text: #e2e8f0, cta_bg: #334155, cta_text: #ffffff
-
-PALETTE 5 - Rose (Beauty/Lifestyle/Fashion):
-  primary: #e11d48, secondary: #be123c, accent: #fb7185, background: #fff1f2, text: #1c1917
-  header_bg: #1c1917, header_text: #fecdd3, footer_bg: #1c1917, footer_text: #fecdd3, cta_bg: #e11d48, cta_text: #ffffff
-
-PALETTE 6 - Crimson Red (Bold/Sports/Events):
-  primary: #dc2626, secondary: #b91c1c, accent: #f87171, background: #ffffff, text: #1e293b
-  header_bg: #0f172a, header_text: #fee2e2, footer_bg: #1e293b, footer_text: #fee2e2, cta_bg: #dc2626, cta_text: #ffffff
-
-PALETTE 7 - Teal Modern (Consulting/Agency/Services):
-  primary: #0d9488, secondary: #0f766e, accent: #2dd4bf, background: #ffffff, text: #1e293b
-  header_bg: #0f172a, header_text: #ccfbf1, footer_bg: #1e293b, footer_text: #ccfbf1, cta_bg: #0d9488, cta_text: #ffffff
-
-DESIGN EXCELLENCE RULES:
-1. Use the advanced block types (features, stats, testimonials, pricing) for professional layouts
-2. Every page should have a Hero block at the top
-3. End most pages with a CTA block to drive conversions
-4. Use emoji icons for feature blocks (⚡🔒📱🚀💡🎯✨🌟💪🎨)
-5. Stats should have impressive, specific numbers with + or % signs
-6. Testimonials should include realistic names and roles
-7. Generate 4-5 pages typically: Home, About, Services/Products, Pricing, Contact
-8. CRITICAL: NEVER use purple, violet, indigo, or magenta colors anywhere. Forbidden hex values include but are not limited to: #7c3aed, #8b5cf6, #a855f7, #9333ea, #4f46e5, #4338ca, #6366f1, #818cf8, #a78bfa, #7e22ce, #6d28d9
-9. CRITICAL: All pages MUST share the same primary color, font family, and spacing scale chosen from the selected palette. The site must look visually unified across every page.
+DESIGN PHILOSOPHY:
+- Design each website as a unique creative work — not a template fill-in
+- Let the client's vision drive all decisions: color, structure, tone, content order
+- Choose block types and layouts based on what serves this specific site
+- Every page should feel like part of one intentional, cohesive design system
+- Content must be specific and real, not placeholder text
+- For icons use Material Symbols names (lowercase with underscores): bolt, check_circle, star, rocket_launch, shield, speed, lightbulb, favorite, trending_up, verified, groups, person, settings, support, payments, handshake, eco, security, insights, analytics, mail, phone, location_on, schedule, palette, brush, camera, restaurant, fitness_center, school, home, work, explore
 PROMPT;
     }
 }
@@ -13591,70 +13419,62 @@ class AIOrchestrator {
         header('X-Accel-Buffering: no'); // disable nginx buffering
         if (ob_get_level()) ob_end_clean();
 
-        $input        = json_decode(file_get_contents('php://input'), true) ?? [];
-        $bizName      = trim($input['business_name'] ?? '');
-        $industry     = trim($input['industry'] ?? '');
-        $description  = trim($input['description'] ?? '');
-        $tone         = trim($input['tone'] ?? 'professional');
-        $colorPref    = trim($input['color_preference'] ?? '');
-        $uiTheme      = trim($input['ui_theme'] ?? 'light');
-        $pagesNeeded  = trim($input['pages_needed'] ?? '');
-        $userContent  = trim($input['user_content'] ?? '');
-        $features     = (array)($input['features'] ?? []);
-
-        // Build unified prompt from form fields
-        $promptParts = [];
-        if ($bizName)     $promptParts[] = "Business name: {$bizName}";
-        if ($industry)    $promptParts[] = "Industry: {$industry}";
-        if ($description) $promptParts[] = "Description: {$description}";
-        if ($tone)        $promptParts[] = "Tone: {$tone}";
-        if ($colorPref)   $promptParts[] = "Color preference: {$colorPref}";
-        if ($pagesNeeded) $promptParts[] = "Pages needed: {$pagesNeeded}";
-        if ($userContent) $promptParts[] = "Existing content: {$userContent}";
-        if ($features)    $promptParts[] = "Features: " . implode(', ', $features);
-        $prompt = implode('. ', $promptParts);
+        $input       = json_decode(file_get_contents('php://input'), true) ?? [];
+        $bizName     = trim($input['business_name'] ?? '');
+        $description = trim($input['description'] ?? '');
 
         if (empty(trim($bizName . $description))) {
-            self::sseEvent('error', ['message' => 'Business name and description are required.']);
+            self::sseEvent('error', ['message' => 'Project name and description are required.']);
             return;
         }
-
-        $pageType = 'landing'; // default fallback for per-page generation
 
         if (!AI::isConfigured()) {
             self::sseEvent('error', ['message' => 'AI is not configured. Add an API key in Settings.']);
             return;
         }
 
+        // Build a rich creative brief from all provided fields
+        $briefParts = [];
+        if ($bizName)                          $briefParts[] = "Project/business name: {$bizName}";
+        if ($description)                      $briefParts[] = "Description: {$description}";
+        if (!empty($input['target_audience'])) $briefParts[] = "Target audience: {$input['target_audience']}";
+        if (!empty($input['visual_style']))    $briefParts[] = "Visual style: {$input['visual_style']}";
+        if (!empty($input['color_preference'])) $briefParts[] = "Color direction: {$input['color_preference']}";
+        if (!empty($input['pages_needed']))    $briefParts[] = "Pages needed: {$input['pages_needed']}";
+        if (!empty($input['features']))        $briefParts[] = "Features/functionality: " . (is_array($input['features']) ? implode(', ', $input['features']) : $input['features']);
+        if (!empty($input['design_inspiration'])) $briefParts[] = "Design inspiration: {$input['design_inspiration']}";
+        $brief = implode("\n", $briefParts);
+
         try {
             // ── Stage 1: Site Structure ──────────────────────────────────
             self::sseEvent('stage', ['stage' => 1, 'label' => 'Designing site structure…', 'total' => 3]);
 
             $structurePrompt = <<<EOT
-You are an expert web designer. Based on the following brief, generate a site blueprint.
-Brief: {$prompt}
-Preferred UI theme: {$uiTheme}
+You are designing the architecture for a website. Based on the creative brief below, design the complete site structure — freely and intentionally. No templates, no presets.
 
-Respond with ONLY valid JSON (no markdown, no explanation):
+CREATIVE BRIEF:
+{$brief}
+
+Choose everything: how many pages (typically 3-7), what each page accomplishes, a color palette that matches the personality, navigation that serves this site's needs.
+
+Respond with ONLY valid JSON:
 {
-  "site_name": "Business Name",
-  "tagline": "A catchy tagline",
-  "ui_theme": "{$uiTheme}",
+  "site_name": "...",
+  "tagline": "A tagline that captures the brand essence",
   "colors": {
     "primary": "#hex", "secondary": "#hex", "accent": "#hex",
-    "background": "#fff", "text": "#1e293b",
-    "header_bg": "#hex", "header_text": "#f8fafc",
-    "footer_bg": "#1e293b", "footer_text": "#f1f5f9",
-    "cta_bg": "#hex", "cta_text": "#ffffff"
+    "background": "#hex", "text": "#hex",
+    "header_bg": "#hex", "header_text": "#hex",
+    "footer_bg": "#hex", "footer_text": "#hex",
+    "cta_bg": "#hex", "cta_text": "#hex"
   },
   "nav": [{"label": "Home", "url": "/"}, {"label": "About", "url": "/about"}],
   "pages": [
-    {"slug": "home", "title": "Home", "meta_description": "...", "page_type": "landing"},
-    {"slug": "about", "title": "About", "meta_description": "...", "page_type": "about"}
+    {"slug": "home", "title": "Home", "meta_description": "...", "purpose": "What this page accomplishes"},
+    {"slug": "about", "title": "About", "meta_description": "...", "purpose": "..."}
   ],
-  "footer": {"text": "© 2025 Business Name.", "links": [], "social": []}
+  "footer": {"text": "© 2026 Site Name.", "links": [], "social": []}
 }
-Rules: Never use purple/violet/indigo. Use a harmonious color palette. 3–5 pages.
 EOT;
 
             $structure = AI::generate($structurePrompt);
@@ -13665,49 +13485,57 @@ EOT;
 
             self::sseEvent('stage_complete', ['stage' => 1, 'data' => [
                 'site_name' => $structure['site_name'] ?? '',
-                'ui_theme'  => $structure['ui_theme'] ?? 'emerald',
                 'pages'     => array_column($structure['pages'] ?? [], 'title'),
             ]]);
 
             // ── Stage 2: Generate Content Per Page ───────────────────────
-            $pages         = $structure['pages'] ?? [];
-            $builtPages    = [];
-            $totalPages    = count($pages);
+            $pages      = $structure['pages'] ?? [];
+            $builtPages = [];
+            $totalPages = count($pages);
+            $primaryColor = $structure['colors']['primary'] ?? 'brand primary';
+            $accentColor  = $structure['colors']['accent'] ?? 'brand accent';
+            $userContent  = !empty($input['user_content']) ? "\nExisting content to incorporate:\n{$input['user_content']}" : '';
 
             foreach ($pages as $i => $pageMeta) {
                 $label   = $pageMeta['title'] ?? ('Page ' . ($i + 1));
                 $pageNum = $i + 1;
                 self::sseEvent('stage', [
-                    'stage'   => 2,
-                    'label'   => "Generating content for \"{$label}\" ({$pageNum}/{$totalPages})\u{2026}",
-                    'message' => "Writing content for \"{$label}\" ({$pageNum}/{$totalPages})\u{2026}",
-                    'page'    => $label,
-                    'total'   => 3,
+                    'stage'        => 2,
+                    'label'        => "Generating content for \"{$label}\" ({$pageNum}/{$totalPages})\u{2026}",
+                    'message'      => "Writing content for \"{$label}\" ({$pageNum}/{$totalPages})\u{2026}",
+                    'page'         => $label,
+                    'total'        => 3,
                     'sub_progress' => ['current' => $pageNum, 'total' => $totalPages],
                 ]);
 
-                $pType      = $pageMeta['page_type'] ?? $pageType;
-                $recommended = AIPageAPI::getBlocksForType($pType);
-                $blockList   = implode(', ', $recommended);
+                $pagePurpose = $pageMeta['purpose'] ?? "A page titled \"{$label}\"";
 
                 $pagePrompt = <<<EOT
-Site: {$structure['site_name']}. Colors: primary={$structure['colors']['primary']}, accent={$structure['colors']['accent']}.
-Page: "{$label}" (type: {$pType}).
-User brief: {$prompt}
+Generate the content for one page of a website. Design it freely — choose whichever blocks best serve this page's purpose.
 
-Generate the content blocks for this page. Respond with ONLY valid JSON:
+SITE CONTEXT:
+- Site name: {$structure['site_name']}
+- Creative brief: {$brief}
+- Color palette: primary={$primaryColor}, accent={$accentColor}
+{$userContent}
+
+THIS PAGE:
+- Title: {$label}
+- Slug: {$pageMeta['slug']}
+- Purpose: {$pagePurpose}
+
+Available blocks: hero, text, features, cards, stats, testimonials, pricing, team, faq, cta, form, quote, gallery, timeline, steps, checklist, newsletter, contact_info, logo_cloud, comparison, tabs, accordion, image, columns, social
+
+Respond with ONLY valid JSON (only "meta_description" and "blocks"):
 {
-  "slug": "{$pageMeta['slug']}",
-  "title": "{$label}",
-  "meta_description": "...",
+  "meta_description": "SEO description (150-160 chars)",
   "blocks": [
-    {"type": "hero", "content": {...}},
-    ...
+    {"type": "block_type", "content": { ... }}
   ]
 }
 
-Recommended block types for {$pType}: {$blockList}
-Rules: Use the site's primary color. No purple/indigo. Start with a hero block. End with a CTA.
+Write specific, compelling content. Choose 4-8 blocks that genuinely serve this page's goal. No placeholder text.
+For icons use Material Symbols names (lowercase): bolt, check_circle, star, rocket_launch, shield, speed, lightbulb, favorite, trending_up, verified, groups, person, settings, support, payments, mail, phone, location_on
 EOT;
 
                 $pageResult = AI::generate($pagePrompt);
@@ -13717,7 +13545,6 @@ EOT;
                         'meta_description' => $pageResult['meta_description'] ?? ($pageMeta['meta_description'] ?? ''),
                     ]);
                 } else {
-                    // Fallback: add the page with a minimal hero block
                     $builtPages[] = array_merge($pageMeta, [
                         'blocks' => [['type' => 'hero', 'content' => ['title' => $label, 'subtitle' => '', 'button' => 'Learn More', 'url' => '/contact']]],
                     ]);
@@ -13762,64 +13589,26 @@ class AIController {
      */
     public static function form(): void {
         Auth::require('*');
-        
-        $industries = [
-            'Restaurant/Food Service',
-            'Law Firm/Legal',
-            'Medical/Healthcare',
-            'E-commerce/Retail',
-            'Portfolio/Creative',
-            'Blog/News',
-            'Agency/Consulting',
-            'Real Estate',
-            'Education',
-            'Non-Profit',
-            'Technology/SaaS',
-            'Other'
-        ];
-        
-        $tones = [
-            'Professional' => 'Formal and business-oriented',
-            'Friendly' => 'Warm and approachable',
-            'Playful' => 'Fun and creative',
-            'Minimal' => 'Clean and simple',
-            'Bold' => 'Strong and confident'
-        ];
-        
-        $features = [
-            'contact_form' => 'Contact Form',
-            'gallery' => 'Image Gallery',
-            'testimonials' => 'Testimonials',
-            'faq' => 'FAQ Section',
-            'blog' => 'Blog/News',
-            'newsletter' => 'Newsletter Signup',
-            'team' => 'Team Members',
-            'pricing' => 'Pricing Table',
-            'portfolio' => 'Portfolio/Projects'
-        ];
-        
-        $isConfigured = AI::isConfigured();
+
+        $isConfigured    = AI::isConfigured();
         $currentProvider = Settings::get('ai_provider', '');
-        $currentModel = Settings::get('ai_model', '');
-        $hasApiKey = !empty(Settings::get('ai_api_key', ''));
-        
+        $currentModel    = Settings::get('ai_model', '');
+        $hasApiKey       = !empty(Settings::get('ai_api_key', ''));
+
         $providerNames = [
-            'openai' => 'OpenAI',
+            'openai'    => 'OpenAI',
             'anthropic' => 'Anthropic',
-            'google' => 'Google Gemini'
+            'google'    => 'Google Gemini'
         ];
-        
+
         self::renderAdmin('admin_ai', [
-            'industries' => $industries,
-            'tones' => $tones,
-            'features' => $features,
-            'is_configured' => $isConfigured,
-            'current_provider_openai' => ($currentProvider === 'openai'),
+            'is_configured'             => $isConfigured,
+            'current_provider_openai'   => ($currentProvider === 'openai'),
             'current_provider_anthropic' => ($currentProvider === 'anthropic'),
-            'current_provider_google' => ($currentProvider === 'google'),
-            'current_provider_name' => $providerNames[$currentProvider] ?? 'Unknown',
-            'current_model' => $currentModel,
-            'has_api_key' => $hasApiKey
+            'current_provider_google'   => ($currentProvider === 'google'),
+            'current_provider_name'     => $providerNames[$currentProvider] ?? 'Unknown',
+            'current_model'             => $currentModel,
+            'has_api_key'               => $hasApiKey
         ]);
     }
     
@@ -13888,25 +13677,25 @@ class AIController {
         
         // Collect user input
         $input = [
-            'business_name' => trim(Request::input('business_name', '')),
-            'industry' => Request::input('industry', ''),
-            'description' => trim(Request::input('description', '')),
-            'tone' => Request::input('tone', 'Professional'),
-            'features' => Request::input('features', []),
-            'color_preference' => trim(Request::input('color_preference', '')),
-            'pages_needed' => trim(Request::input('pages_needed', '')),
-            'user_content' => trim(Request::input('user_content', '')),
-            'ui_theme' => Request::input('ui_theme', 'emerald')
+            'business_name'      => trim(Request::input('business_name', '')),
+            'description'        => trim(Request::input('description', '')),
+            'target_audience'    => trim(Request::input('target_audience', '')),
+            'visual_style'       => trim(Request::input('visual_style', '')),
+            'color_preference'   => trim(Request::input('color_preference', '')),
+            'pages_needed'       => trim(Request::input('pages_needed', '')),
+            'features'           => trim(Request::input('features', '')),
+            'design_inspiration' => trim(Request::input('design_inspiration', '')),
+            'user_content'       => trim(Request::input('user_content', '')),
         ];
-        
+
         // Validation
         if (empty($input['business_name'])) {
-            Session::flash('error', 'Business name is required.');
+            Session::flash('error', 'Project name is required.');
             Response::redirect('/admin/ai');
         }
-        
+
         if (empty($input['description'])) {
-            Session::flash('error', 'Business description is required.');
+            Session::flash('error', 'Project description is required.');
             Response::redirect('/admin/ai');
         }
         
@@ -13980,12 +13769,11 @@ class AIController {
         // Combine into final plan
         $plan = [
             'site_name' => $structure['site_name'] ?? $input['business_name'],
-            'tagline' => $structure['tagline'] ?? '',
-            'colors' => $structure['colors'] ?? self::getDefaultColors(),
-            'ui_theme' => $input['ui_theme'],
-            'pages' => $detailedPages,
-            'nav' => $structure['nav'] ?? [],
-            'footer' => $structure['footer'] ?? ['text' => '© ' . date('Y') . ' ' . $input['business_name']]
+            'tagline'   => $structure['tagline'] ?? '',
+            'colors'    => $structure['colors'] ?? self::getDefaultColors(),
+            'pages'     => $detailedPages,
+            'nav'       => $structure['nav'] ?? [],
+            'footer'    => $structure['footer'] ?? ['text' => '© ' . date('Y') . ' ' . $input['business_name']]
         ];
         
         error_log("=== MULTI-STAGE GENERATION COMPLETE ===");
@@ -14028,85 +13816,87 @@ class AIController {
      * Build prompt for STAGE 1: Site structure
      */
     private static function buildStructurePrompt(array $input): string {
-        $features = is_array($input['features']) ? implode(', ', $input['features']) : '';
-        
+        $brief = self::buildBrief($input);
+
         return <<<PROMPT
-You are planning the structure for a website. Generate ONLY the site skeleton - no page content yet.
+You are designing the architecture for a website. Based on the creative brief below, design the complete site structure — freely and intentionally. There are no required templates or page types to follow.
 
-BUSINESS INFO:
-- Name: {$input['business_name']}
-- Industry: {$input['industry']}
-- Description: {$input['description']}
-- Tone: {$input['tone']}
-- Color preference: {$input['color_preference']}
-- Requested pages: {$input['pages_needed']}
-- Features needed: {$features}
+CREATIVE BRIEF:
+{$brief}
 
-RESPOND WITH JSON:
+Design the structure that is right for THIS specific site. Choose:
+- How many pages make sense (typically 3-7) and what each should accomplish
+- A color palette that perfectly matches the personality and feel described
+- Navigation that serves this site's unique needs
+- A footer that fits the brand
+
+Respond with ONLY valid JSON:
 {
-  "site_name": "Business Name",
-  "tagline": "Short tagline",
+  "site_name": "...",
+  "tagline": "A tagline that captures the brand essence",
   "colors": {
     "primary": "#hex",
-    "secondary": "#hex", 
+    "secondary": "#hex",
     "accent": "#hex",
-    "background": "#ffffff",
-    "text": "#1e293b",
+    "background": "#hex",
+    "text": "#hex",
     "header_bg": "#hex",
     "header_text": "#hex",
     "footer_bg": "#hex",
-    "footer_text": "#hex"
+    "footer_text": "#hex",
+    "cta_bg": "#hex",
+    "cta_text": "#hex"
   },
   "pages": [
-    {"slug": "home", "title": "Home", "purpose": "Main landing page with hero and key features"},
-    {"slug": "about", "title": "About", "purpose": "Company story and team"},
-    {"slug": "services", "title": "Services", "purpose": "List of services offered"}
+    {"slug": "home", "title": "Home", "meta_description": "...", "purpose": "What this page accomplishes for visitors"},
+    {"slug": "about", "title": "About", "meta_description": "...", "purpose": "..."}
   ],
-  "nav": [
-    {"label": "Home", "url": "/"},
-    {"label": "About", "url": "/about"}
-  ],
+  "nav": [{"label": "Home", "url": "/"}, {"label": "About", "url": "/about"}],
   "footer": {
-    "text": "© 2026 Business Name. All rights reserved."
+    "text": "© 2026 Site Name.",
+    "links": [],
+    "social": []
   }
 }
-
-GUIDELINES:
-- Include 4-7 pages based on the business type
-- First page should be "home" with slug "home"
-- Order pages logically (Home, About, Services, etc.)
-- Choose colors that match the industry and requested preference
-- Nav should match the pages in logical order
 
 RESPOND ONLY WITH VALID JSON.
 PROMPT;
     }
-    
+
+    /**
+     * Build a rich creative brief string from user input
+     */
+    private static function buildBrief(array $input): string {
+        $parts = [];
+        if (!empty($input['business_name'])) $parts[] = "Project/business name: {$input['business_name']}";
+        if (!empty($input['description']))   $parts[] = "Description: {$input['description']}";
+        if (!empty($input['target_audience'])) $parts[] = "Target audience: {$input['target_audience']}";
+        if (!empty($input['visual_style']))  $parts[] = "Visual style: {$input['visual_style']}";
+        if (!empty($input['color_preference'])) $parts[] = "Color direction: {$input['color_preference']}";
+        if (!empty($input['pages_needed'])) $parts[] = "Pages needed: {$input['pages_needed']}";
+        if (!empty($input['features']))     $parts[] = "Functionality needed: " . (is_array($input['features']) ? implode(', ', $input['features']) : $input['features']);
+        if (!empty($input['design_inspiration'])) $parts[] = "Design inspiration: {$input['design_inspiration']}";
+        return implode("\n", $parts);
+    }
+
     /**
      * Build prompt for STAGE 2: Individual page content
      */
     private static function buildPagePrompt(array $input, array $pagePlan, array $structure): string {
-        $pageType = self::inferPageType($pagePlan['slug'], $pagePlan['title']);
-        $blockRecommendations = self::getBlockRecommendations($pageType);
-        
-        // Smart feature routing - only include relevant features for this page type
-        $relevantFeatures = self::getRelevantFeatures($input['features'] ?? [], $pageType);
-        $featuresStr = !empty($relevantFeatures) 
-            ? "REQUIRED FEATURES FOR THIS PAGE - You MUST include these blocks:\n" . implode("\n", $relevantFeatures)
-            : '';
-        
-        $userContent = !empty($input['user_content']) ? "\nUser-provided content to incorporate:\n{$input['user_content']}" : '';
-        
-        $pagePurpose = $pagePlan['purpose'] ?? 'Page for ' . $pagePlan['title'];
-        
-        return <<<PROMPT
-Generate detailed content blocks for ONE page of a website.
+        $brief = self::buildBrief($input);
+        $pagePurpose = $pagePlan['purpose'] ?? "A page titled \"{$pagePlan['title']}\"";
+        $userContent = !empty($input['user_content']) ? "\nExisting content to incorporate:\n{$input['user_content']}" : '';
+        $colors = $structure['colors'] ?? [];
+        $primaryColor = $colors['primary'] ?? 'brand primary';
+        $accentColor = $colors['accent'] ?? 'brand accent';
 
-BUSINESS CONTEXT:
-- Name: {$input['business_name']}
-- Industry: {$input['industry']}
-- Description: {$input['description']}
-- Tone: {$input['tone']}
+        return <<<PROMPT
+Generate the content for one page of a website. Design it freely — choose whichever blocks best serve this page's purpose and the site's overall vision.
+
+SITE CONTEXT:
+- Site name: {$structure['site_name']}
+- Creative brief: {$brief}
+- Color palette: primary={$primaryColor}, accent={$accentColor}
 {$userContent}
 
 THIS PAGE:
@@ -14114,138 +13904,26 @@ THIS PAGE:
 - Slug: {$pagePlan['slug']}
 - Purpose: {$pagePurpose}
 
-RECOMMENDED BLOCKS FOR THIS PAGE TYPE ({$pageType}):
-{$blockRecommendations}
+Choose block types and their order based purely on what serves this page best. There are no required or forbidden block types.
 
-{$featuresStr}
+Available blocks: hero, text, features, cards, stats, testimonials, pricing, team, faq, cta, form, quote, gallery, timeline, steps, checklist, newsletter, contact_info, logo_cloud, comparison, tabs, accordion, image, columns, social
 
-RESPOND WITH JSON:
+Respond with ONLY valid JSON (only "meta_description" and "blocks" — nothing else):
 {
-  "meta_description": "SEO description for this page (150-160 chars)",
+  "meta_description": "SEO description (150-160 chars)",
   "blocks": [
-    {"type": "hero", "content": {"title": "...", "subtitle": "...", "button": "...", "url": "..."}},
-    {"type": "features", "content": {"title": "...", "items": [{"icon": "star", "title": "...", "description": "..."}]}},
-    {"type": "cta", "content": {"title": "...", "text": "...", "button": "...", "url": "/contact"}}
+    {"type": "block_type", "content": { ... }}
   ]
 }
 
-IMPORTANT: Only return the "meta_description" and "blocks" fields above. Do NOT return site_name, colors, pages array, nav, or footer - only the two fields shown above.
-
-AVAILABLE BLOCK TYPES:
-- hero: {title, subtitle, button, url}
-- text: {content} (HTML)
-- features: {title, subtitle, items[{icon, title, description}]}
-- cards: {title, items[{icon, title, description, button, url}]}
-- stats: {title, items[{value, label, icon}]}
-- testimonials: {title, items[{quote, author, role, rating}]}
-- pricing: {title, plans[{name, price, period, features[], button, url, featured}]}
-- team: {title, members[{name, role, bio, photo}]}
-- faq: {title, items[{question, answer}]}
-- cta: {title, text, button, url}
-- form: {title, fields[{type, label, required}], button}
-- gallery: {title, images[{url, alt}], columns}
-- quote: {text, author, role}
-- steps: {title, items[{number, title, description}]}
-- timeline: {title, items[{date, title, description}]}
-- checklist: {title, items[]}
-- contact_info: {items[{icon, label, value, url}]}
-- newsletter: {title, text, button, placeholder}
-
-GUIDELINES:
-- Generate 4-8 blocks per page
-- Start with hero for main pages
-- Include real, detailed content - not placeholders
-- Use specific numbers, names relevant to the business
-- End with CTA or contact section
-- For items arrays, include 3-5 realistic items
-- For icons, use Material Symbols names (lowercase with underscores): star, check_circle, rocket_launch, shield, speed, lightbulb, favorite, trending_up, verified, bolt, groups, person, settings, support, payments, handshake, eco, security, insights, analytics, mail, phone, location_on, schedule
+PRINCIPLES:
+- Write specific, compelling content — not placeholder text
+- Choose 4-8 blocks that genuinely serve this page's goal
+- Keep the visual personality consistent with the site's creative brief
+- For icons use Material Symbols names (lowercase): bolt, check_circle, star, rocket_launch, shield, speed, lightbulb, favorite, trending_up, verified, groups, person, settings, support, payments, handshake, eco, security, insights, analytics, mail, phone, location_on, schedule
 
 RESPOND ONLY WITH VALID JSON.
 PROMPT;
-    }
-    
-    /**
-     * Get features relevant to a specific page type
-     */
-    private static function getRelevantFeatures(array $selectedFeatures, string $pageType): array {
-        // Map features to the pages where they should appear
-        $featurePageMap = [
-            'contact_form' => ['contact', 'general'],
-            'gallery' => ['portfolio', 'about', 'gallery', 'landing'],
-            'testimonials' => ['landing', 'about', 'services', 'testimonials'],
-            'faq' => ['faq', 'contact', 'pricing', 'services', 'landing'],
-            'blog' => ['blog'],
-            'newsletter' => ['landing', 'blog', 'contact', 'general'],
-            'team' => ['about', 'team'],
-            'pricing' => ['pricing', 'services'],
-            'portfolio' => ['portfolio', 'landing']
-        ];
-        
-        // Map feature keys to instructions
-        $featureInstructions = [
-            'contact_form' => '- CONTACT FORM: Add a "form" block with name, email, phone, and message fields',
-            'gallery' => '- GALLERY: Add a "gallery" block showcasing images (use placeholder URLs like /gallery/1.jpg)',
-            'testimonials' => '- TESTIMONIALS: Add a "testimonials" block with 3-4 customer reviews including quotes, names, roles, and ratings',
-            'faq' => '- FAQ: Add a "faq" block with 5-6 relevant questions and detailed answers',
-            'blog' => '- BLOG: Add a "cards" block featuring recent blog posts with titles and descriptions',
-            'newsletter' => '- NEWSLETTER: Add a "newsletter" block for email signup with compelling copy',
-            'team' => '- TEAM: Add a "team" block with 3-5 team members including names, roles, and bios',
-            'pricing' => '- PRICING: Add a "pricing" block with 2-3 pricing tiers, features, and CTAs',
-            'portfolio' => '- PORTFOLIO: Add a "gallery" or "cards" block showcasing projects/work'
-        ];
-        
-        $relevant = [];
-        foreach ($selectedFeatures as $feature) {
-            $allowedPages = $featurePageMap[$feature] ?? [];
-            if (in_array($pageType, $allowedPages)) {
-                $relevant[] = $featureInstructions[$feature] ?? "- Include {$feature}";
-            }
-        }
-        
-        return $relevant;
-    }
-    
-    /**
-     * Infer page type from slug/title
-     */
-    private static function inferPageType(string $slug, string $title): string {
-        $slug = strtolower($slug);
-        $title = strtolower($title);
-        
-        return match(true) {
-            str_contains($slug, 'home') || $slug === '' => 'landing',
-            str_contains($slug, 'about') || str_contains($title, 'about') => 'about',
-            str_contains($slug, 'service') || str_contains($title, 'service') => 'services',
-            str_contains($slug, 'pricing') || str_contains($slug, 'price') => 'pricing',
-            str_contains($slug, 'contact') => 'contact',
-            str_contains($slug, 'team') => 'team',
-            str_contains($slug, 'faq') || str_contains($title, 'faq') => 'faq',
-            str_contains($slug, 'portfolio') || str_contains($slug, 'work') || str_contains($slug, 'project') => 'portfolio',
-            str_contains($slug, 'blog') || str_contains($slug, 'news') => 'blog',
-            str_contains($slug, 'testimonial') || str_contains($slug, 'review') => 'testimonials',
-            default => 'general'
-        };
-    }
-    
-    /**
-     * Get block recommendations for page type
-     */
-    private static function getBlockRecommendations(string $pageType): string {
-        $recommendations = [
-            'landing' => "hero (impactful headline), features (3-4 key benefits), stats (impressive numbers), testimonials (social proof), cta (call to action)",
-            'about' => "hero (company intro), text (story/history), timeline (milestones), team (key people), stats (achievements), quote (founder message), cta",
-            'services' => "hero (services overview), cards (service offerings), features (why choose us), steps (process), pricing (if applicable), testimonials, cta, form",
-            'pricing' => "hero (pricing intro), pricing (plans table), features (what's included), faq (pricing questions), testimonials, cta",
-            'contact' => "hero (get in touch), contact_info (phone/email/address), form (contact form), faq (quick answers)",
-            'team' => "hero (meet the team), team (members with bios), text (culture/values), stats (team achievements), cta",
-            'faq' => "hero (help center), faq (categorized Q&As), cta (still have questions?), contact_info",
-            'portfolio' => "hero (our work), gallery (project images), cards (case studies), testimonials, stats, cta",
-            'blog' => "hero (blog intro), cards (recent posts), newsletter (subscribe), cta",
-            'testimonials' => "hero (what clients say), testimonials (detailed reviews), stats (satisfaction metrics), cta",
-            'general' => "hero, text, features, cta"
-        ];
-        
-        return $recommendations[$pageType] ?? $recommendations['general'];
     }
 }
 
@@ -14287,13 +13965,22 @@ class AIConversation {
         $history[] = ['role' => 'user', 'content' => $userMessage];
 
         $systemPrompt = <<<'SYS'
-You are a friendly, expert web design consultant helping a client describe what they want for their website.
-Your goal is to gather enough information to build a complete website for them through a natural conversation.
-Ask about: business name, industry, services/products, target audience, tone, color preferences, what pages they need, any special features.
-Keep responses concise (2-4 sentences max) and ask ONE follow-up question at a time.
-Once you have enough information (after 3-6 exchanges), respond with EXACTLY this JSON on its own line:
-{"__READY__": true, "brief": {"business_name": "...", "industry": "...", "description": "...", "tone": "professional", "color_preference": "...", "pages_needed": "...", "features": []}}
-Do not include anything else on that line. Before that line you may write a brief summary message.
+You are a creative web design partner who builds genuinely unique, tailored websites. Your job is to deeply understand what the person envisions through natural, curious conversation — not to fill out a form.
+
+Explore their vision with open, thoughtful questions. Ask about things like:
+- The purpose and story behind their project or business
+- Who their visitors are and what those people care about
+- The feeling they want visitors to experience (inspired? calm? excited? informed?)
+- Their visual personality — minimal, bold, warm, technical, playful, elegant?
+- Any websites, brands, or aesthetics they admire or want to be different from
+- What's the single most important action they want visitors to take
+- What pages or sections they have in mind, and any specific features needed
+
+Keep responses warm and conversational. Ask ONE clear question at a time. Build on their answers — make them feel understood, not interrogated.
+
+After 4-7 exchanges (when you genuinely understand their vision), output EXACTLY this JSON on its own line:
+{"__READY__": true, "brief": {"business_name": "...", "description": "A rich, detailed synthesis of everything you learned — personality, audience, visual style, goals, tone, specific needs and preferences. Make it detailed enough that an AI designer could build the perfect site from it alone.", "target_audience": "...", "visual_style": "...", "color_preference": "...", "pages_needed": "...", "design_inspiration": "...", "features": []}}
+Do not include anything else on that line. Before that line you may write a warm summary message.
 SYS;
 
         // Build messages for AI call
