@@ -12939,24 +12939,25 @@ class AIPageAPI {
     public static function generate(): void {
         // Suppress HTML error output for JSON API
         ini_set('html_errors', '0');
-        
+
         try {
             Auth::require('content.edit');
-            
+
             $input = json_decode(file_get_contents('php://input'), true);
             $prompt = trim($input['prompt'] ?? '');
             $pageType = $input['pageType'] ?? 'custom';
             $recommendedBlocks = $input['recommendedBlocks'] ?? [];
-            
+
             if (empty($prompt)) {
                 Response::json(['success' => false, 'error' => 'Please provide a description for the page.'], 400);
             }
-            
+
             if (!AI::isConfigured()) {
                 Response::json(['success' => false, 'error' => 'AI is not configured. Please set up an API key in Settings.'], 400);
             }
-            
-            $fullPrompt = self::buildPrompt($prompt, $pageType, $recommendedBlocks);
+
+            $siteContext = self::getSiteContext();
+            $fullPrompt = self::buildPrompt($prompt, $pageType, $recommendedBlocks, $siteContext);
             $result = AI::generate($fullPrompt);
             
             if (!$result) {
@@ -12990,10 +12991,28 @@ class AIPageAPI {
         return trim($slug, '-');
     }
     
-    private static function buildPrompt(string $userPrompt, string $pageType = 'custom', array $recommendedBlocks = []): string {
+    private static function getSiteContext(): array {
+        $siteName = Settings::get('site_name', '');
+        $tagline  = Settings::get('tagline', '');
+
+        $colorRows = DB::fetchAll("SELECT key, value FROM theme_styles WHERE key LIKE 'color_%'");
+        $colors = [];
+        foreach ($colorRows as $row) {
+            // Strip "color_" prefix to match the structure used in buildPagePrompt()
+            $colors[substr($row['key'], 6)] = $row['value'];
+        }
+
+        return [
+            'site_name' => $siteName,
+            'tagline'   => $tagline,
+            'colors'    => $colors,
+        ];
+    }
+
+    private static function buildPrompt(string $userPrompt, string $pageType = 'custom', array $recommendedBlocks = [], array $siteContext = []): string {
         // Get blocks for this page type
         $blocks = !empty($recommendedBlocks) ? $recommendedBlocks : (self::$pageTypeBlocks[$pageType] ?? self::$pageTypeBlocks['custom']);
-        
+
         // Build focused block definitions for recommended blocks only
         $blockDefs = [];
         foreach ($blocks as $blockType) {
@@ -13002,25 +13021,49 @@ class AIPageAPI {
             }
         }
         $blockDefsStr = implode("\n", $blockDefs);
-        
+
+        // Build site context section from existing theme/brand
+        $siteName  = $siteContext['site_name'] ?? '';
+        $tagline   = $siteContext['tagline'] ?? '';
+        $colors    = $siteContext['colors'] ?? [];
+        $primaryColor   = $colors['primary'] ?? '';
+        $secondaryColor = $colors['secondary'] ?? '';
+        $accentColor    = $colors['accent'] ?? '';
+
+        $siteContextBlock = '';
+        if ($siteName || $primaryColor) {
+            $colorParts = array_filter([
+                $primaryColor   ? "primary={$primaryColor}"     : '',
+                $secondaryColor ? "secondary={$secondaryColor}" : '',
+                $accentColor    ? "accent={$accentColor}"       : '',
+            ]);
+            $siteContextBlock = "\nSITE CONTEXT (this page must match the existing site):\n";
+            if ($siteName) $siteContextBlock .= "- Site name: {$siteName}\n";
+            if ($tagline)  $siteContextBlock .= "- Tagline: {$tagline}\n";
+            if (!empty($colorParts)) {
+                $siteContextBlock .= "- Color palette: " . implode(', ', $colorParts) . "\n";
+            }
+            $siteContextBlock .= "Keep tone, style, and content consistent with this established site identity.\n";
+        }
+
         // Page type guidance
         $typeGuidance = match($pageType) {
-            'landing' => "This is a LANDING PAGE. Start with an impactful hero, showcase key features/benefits, include social proof (testimonials, stats, logos), and end with a strong CTA.",
-            'about' => "This is an ABOUT PAGE. Tell the company story, introduce the team, highlight values/mission, show milestones/timeline, and include trust-building elements.",
-            'services' => "This is a SERVICES PAGE. Clearly present service offerings with cards, explain the process/steps, show pricing if applicable, include testimonials, and add a contact form.",
-            'pricing' => "This is a PRICING PAGE. Present pricing plans clearly with comparison, highlight the recommended plan, address common questions in FAQ, and include testimonials for trust.",
-            'contact' => "This is a CONTACT PAGE. Include a user-friendly form, show contact information (email, phone, address), embed a map if applicable, and add FAQ for common questions.",
+            'landing'   => "This is a LANDING PAGE. Start with an impactful hero, showcase key features/benefits, include social proof (testimonials, stats, logos), and end with a strong CTA.",
+            'about'     => "This is an ABOUT PAGE. Tell the company story, introduce the team, highlight values/mission, show milestones/timeline, and include trust-building elements.",
+            'services'  => "This is a SERVICES PAGE. Clearly present service offerings with cards, explain the process/steps, show pricing if applicable, include testimonials, and add a contact form.",
+            'pricing'   => "This is a PRICING PAGE. Present pricing plans clearly with comparison, highlight the recommended plan, address common questions in FAQ, and include testimonials for trust.",
+            'contact'   => "This is a CONTACT PAGE. Include a user-friendly form, show contact information (email, phone, address), embed a map if applicable, and add FAQ for common questions.",
             'portfolio' => "This is a PORTFOLIO PAGE. Showcase work with a gallery, highlight key projects with cards, include client testimonials and stats, end with a CTA.",
-            'blog' => "This is a BLOG/ARTICLE PAGE. Focus on rich text content, use quotes for emphasis, include relevant images, and end with newsletter signup or related content CTA.",
-            'faq' => "This is an FAQ PAGE. Organize questions logically, provide detailed answers, include contact info for unanswered questions.",
-            'team' => "This is a TEAM PAGE. Present team members with photos and bios, show company culture, include stats about the team, add testimonials.",
-            'product' => "This is a PRODUCT PAGE. Highlight key features, show the product with gallery/images, include specs in a table, add testimonials and comparison with competitors, show pricing.",
-            default => "Create a well-structured page that serves the user's needs with appropriate content blocks."
+            'blog'      => "This is a BLOG/ARTICLE PAGE. Focus on rich text content, use quotes for emphasis, include relevant images, and end with newsletter signup or related content CTA.",
+            'faq'       => "This is an FAQ PAGE. Organize questions logically, provide detailed answers, include contact info for unanswered questions.",
+            'team'      => "This is a TEAM PAGE. Present team members with photos and bios, show company culture, include stats about the team, add testimonials.",
+            'product'   => "This is a PRODUCT PAGE. Highlight key features, show the product with gallery/images, include specs in a table, add testimonials and comparison with competitors, show pricing.",
+            default     => "Create a well-structured page that serves the user's needs with appropriate content blocks."
         };
-        
+
         return <<<PROMPT
 You are generating a {$pageType} page for a website.
-
+{$siteContextBlock}
 USER REQUEST: "{$userPrompt}"
 
 PAGE TYPE GUIDANCE: {$typeGuidance}
@@ -13042,7 +13085,7 @@ CONTENT GUIDELINES:
 2. Use specific numbers, names, and examples relevant to the user's description
 3. Each block should have complete, meaningful content
 4. For items arrays, include 3-6 items with varied, realistic content
-5. Write in a professional but engaging tone
+5. Write in a professional but engaging tone that matches the site identity above
 6. Ensure content flows logically from one block to the next
 7. For icons, use Material Symbols names (lowercase with underscores). Examples: star, check_circle, rocket_launch, shield, speed, lightbulb, favorite, trending_up, verified, bolt, groups, person, settings, support, payments, handshake, eco, security, insights, analytics
 
