@@ -1222,7 +1222,7 @@ class AI {
         return [
             'provider' => Settings::get('ai_provider', 'openai'),
             'api_key' => Settings::getEncrypted('ai_api_key'),
-            'model' => Settings::get('ai_model', 'gpt-4')
+            'model' => Settings::get('ai_model', 'gpt-5.2')
         ];
     }
     
@@ -1238,146 +1238,116 @@ class AI {
         return $response;
     }
     
-    private static function openaiRequest(string $prompt, array $config): string {
-        $ch = curl_init('https://api.openai.com/v1/chat/completions');
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST => true,
-            CURLOPT_HTTPHEADER => [
-                'Content-Type: application/json',
-                'Authorization: Bearer ' . $config['api_key']
-            ],
-            CURLOPT_POSTFIELDS => json_encode([
-                'model' => $config['model'],
-                'messages' => [
-                    ['role' => 'system', 'content' => self::getSystemPrompt()],
-                    ['role' => 'user', 'content' => $prompt]
-                ],
-                'temperature' => 0.7
-            ])
-        ]);
-        
-        $response = curl_exec($ch);
-        curl_close($ch);
-        
-        $data = json_decode($response, true);
-        return $data['choices'][0]['message']['content'] ?? '';
-    }
-    
-    private static function getSystemPrompt(): string {
-        return <<<PROMPT
-You are an expert website builder AI. When given information about a business or website, you generate a complete site plan in JSON format.
+    // HTTP requests use PHP streams (file_get_contents + stream_context_create),
+    // never curl. Providers: openai, anthropic, google.
+    // See AI::generate() / AI::stream() in index.php for full implementation.
 
-Your output must be valid JSON with this structure:
-{
-  "site_name": "Business Name",
-  "tagline": "A catchy tagline",
-  "colors": {
-    "primary": "#hexcode",
-    "secondary": "#hexcode",
-    "accent": "#hexcode",
-    "background": "#hexcode",
-    "text": "#hexcode"
-  },
-  "pages": [
-    {
-      "slug": "home",
-      "title": "Home",
-      "meta_description": "...",
-      "blocks": [
-        {"type": "hero", "content": {"heading": "...", "subheading": "...", "cta_text": "...", "cta_url": "..."}},
-        {"type": "text", "content": {"body": "..."}},
-        {"type": "features", "content": {"items": [{"title": "...", "description": "...", "icon": "..."}]}}
-      ]
-    }
-  ],
-  "nav": [
-    {"label": "Home", "url": "/"},
-    {"label": "About", "url": "/about"}
-  ],
-  "footer": {
-    "text": "© 2026 Business Name",
-    "links": [],
-    "social": []
-  }
-}
+    private static function getSystemPrompt(): string {
+        // Lists block types as primitives — the AI picks whichever blocks suit each page.
+        // No mandatory page structures, no locked colour palettes.
+        return <<<PROMPT
+You are a creative website designer and copywriter AI.
+
+Available block types (use whichever suit each page's purpose):
+hero, features, text, testimonials, gallery, contact, faq, cta, team, pricing, stats
+
+Design rules:
+- Choose blocks freely based on what each page needs — not based on industry templates.
+- Invent a colour palette that matches the brand personality described in the brief.
+- Every site should feel genuinely unique, not like a filled-in template.
+- Output valid JSON only (no markdown fences).
 PROMPT;
     }
 }
 ```
 
-### 9.2 AI Discovery Interview
+### 9.2 AI Creative Brief Form
+
+The generation form at `/admin/ai` collects an open-ended creative brief. There are no industry dropdowns,
+tone selectors, UI-theme presets, or feature checkboxes — the AI interprets the brief freely and makes
+every design decision itself.
 
 ```php
 class AIController {
     public static function form(): string {
-        Auth::require('*');
-        
-        return Template::render('admin/ai_generate', [
-            'industries' => ['Restaurant', 'Law Firm', 'E-commerce', 'Portfolio', 'Blog', 'Agency', 'Other'],
-            'tones' => ['Professional', 'Friendly', 'Playful', 'Formal', 'Casual'],
-            'features' => ['Contact Form', 'Gallery', 'FAQ', 'Testimonials', 'Blog', 'Newsletter Signup']
-        ]);
+        Auth::requireRole('admin');
+        // No preset lists — template renders plain free-text inputs
+        return Template::render('admin_ai', []);
     }
-    
+
     public static function generate(): void {
-        Auth::require('*');
-        CSRF::verify($_POST['_csrf'] ?? '');
-        
-        // Collect user input
+        Auth::requireRole('admin');
+        CSRF::validate();
+
+        // Collect open-ended brief fields
         $input = [
-            'business_name' => Request::input('business_name'),
-            'industry' => Request::input('industry'),
-            'description' => Request::input('description'),
-            'tone' => Request::input('tone'),
-            'features' => Request::input('features', []),
-            'color_preference' => Request::input('color_preference'),
-            'pages_needed' => Request::input('pages_needed'),
-            'user_content' => Request::input('user_content') // Optional user-provided text
+            'business_name'      => Request::input('business_name'),      // required
+            'description'        => Request::input('description'),         // required
+            'target_audience'    => Request::input('target_audience'),
+            'visual_style'       => Request::input('visual_style'),
+            'color_preference'   => Request::input('color_preference'),
+            'design_inspiration' => Request::input('design_inspiration'),
+            'pages_needed'       => Request::input('pages_needed'),
+            'features'           => Request::input('features'),            // free-text
+            'user_content'       => Request::input('user_content'),
         ];
-        
-        // Build prompt
-        $prompt = self::buildPrompt($input);
-        
-        // Call AI
-        $response = AI::generate($prompt);
-        
-        // Parse JSON response
-        $plan = json_decode($response, true);
-        if (!$plan) {
-            Session::flash('error', 'AI response was not valid JSON. Please try again.');
-            Response::redirect('/admin/ai/generate');
-        }
-        
-        // Store in build queue for approval
-        $db = DB::connect();
-        $db->prepare("INSERT INTO build_queue (plan_json, status, created_at) VALUES (?, 'pending', datetime('now'))")
-           ->execute([json_encode($plan)]);
-        
+
+        $brief  = self::buildBrief($input);
+        $struct = AI::generate(self::buildStructurePrompt($brief));
+        $plan   = json_decode($struct, true);
+        // … per-page content generation loop …
+
+        DB::pdo()->prepare(
+            "INSERT INTO build_queue (plan_json, status, created_at) VALUES (?, 'pending', datetime('now'))"
+        )->execute([json_encode($plan)]);
+
         Session::flash('success', 'Site plan generated! Review it in the Approvals queue.');
         Response::redirect('/admin/approvals');
     }
-    
-    private static function buildPrompt(array $input): string {
-        $prompt = "Generate a complete website for the following:\n\n";
-        $prompt .= "Business Name: {$input['business_name']}\n";
-        $prompt .= "Industry: {$input['industry']}\n";
-        $prompt .= "Description: {$input['description']}\n";
-        $prompt .= "Tone: {$input['tone']}\n";
-        $prompt .= "Features needed: " . implode(', ', $input['features']) . "\n";
-        $prompt .= "Color preference: {$input['color_preference']}\n";
-        $prompt .= "Pages: {$input['pages_needed']}\n";
-        
-        if (!empty($input['user_content'])) {
-            $prompt .= "\nUser-provided content to incorporate:\n{$input['user_content']}\n";
-        }
-        
-        $prompt .= "\nGenerate a complete JSON site plan.";
-        
-        return $prompt;
+
+    private static function buildBrief(array $input): string {
+        $parts = ["Business / Project: {$input['business_name']}"];
+        if ($input['description'])        $parts[] = "Description: {$input['description']}";
+        if ($input['target_audience'])    $parts[] = "Target Audience: {$input['target_audience']}";
+        if ($input['visual_style'])       $parts[] = "Visual Style: {$input['visual_style']}";
+        if ($input['color_preference'])   $parts[] = "Colour Direction: {$input['color_preference']}";
+        if ($input['design_inspiration']) $parts[] = "Design Inspiration: {$input['design_inspiration']}";
+        if ($input['pages_needed'])       $parts[] = "Pages: {$input['pages_needed']}";
+        if ($input['features'])           $parts[] = "Features: {$input['features']}";
+        if ($input['user_content'])       $parts[] = "Existing content to use:\n{$input['user_content']}";
+        return implode("\n", $parts);
+    }
+
+    private static function buildStructurePrompt(string $brief): string {
+        return <<<PROMPT
+You are a creative website designer. Based on the brief below, design a complete site architecture.
+
+Choose everything freely: site name, tagline, page list, navigation, footer, and a full colour palette
+that suits the brand personality. Do not follow rigid industry templates.
+
+Output valid JSON only (no markdown fences):
+{
+  "site_name": "...", "tagline": "...",
+  "colors": { "primary": "#hex", "secondary": "#hex", "accent": "#hex",
+              "background": "#hex", "text": "#hex" },
+  "pages": [{ "slug": "home", "title": "Home", "meta_description": "...",
+              "purpose": "Landing page …" }],
+  "nav":    [{ "label": "Home", "url": "/" }],
+  "footer": { "text": "© 2026 …", "links": [], "social": [] }
+}
+
+Brief:
+{$brief}
+PROMPT;
     }
 }
 ```
+
+**System prompt philosophy (`AI::getSystemPrompt()`):**
+The system prompt lists every available block type as a primitive (hero, features, text, testimonials,
+gallery, contact, faq, cta, team, pricing, stats) and instructs the AI to choose blocks by page purpose —
+not by industry template. It forbids mandatory page structures and locked colour palettes, ensuring every
+generated site is genuinely unique.
 
 ### 9.3 Plan Application (After Approval)
 
