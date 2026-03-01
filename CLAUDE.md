@@ -284,16 +284,46 @@ Provider and API key are stored in the `settings` table (key encrypted). Configu
 
 ### Content Generation Workflow
 
-1. Admin triggers AI generation at `/admin/ai/generate` or via chat at `/admin/ai/chat`
-2. AI produces a `plan_json` stored in `build_queue` with status `pending`
+1. Admin fills the open-ended generation form at `/admin/ai` — or uses the chat wizard at `/admin/ai/chat`
+2. AI generates a `plan_json` (site structure → per-page content) stored in `build_queue` with status `pending`
 3. Admin reviews at `/admin/approvals/{id}/preview`
 4. On approval (`/admin/approvals/{id}/approve`) → status becomes `approved`
 5. On apply (`/admin/approvals/{id}/apply`) → content written to DB, status becomes `applied`
 6. On reject → status becomes `rejected` with an optional reason
 
+### Generation Philosophy (Open-Ended Design)
+
+The AI generation system is intentionally **unconstrained**. There are no fixed page templates, no preset colour palettes to choose from, and no forced section order. Everything — pages, layout, colours, typography direction, block selection — is decided by the AI based on the user's creative brief.
+
+**Form fields collected:**
+- `business_name` — project/business name (required)
+- `description` — rich free-text description of what the project is, who it's for, what makes it special (required)
+- `target_audience` — who visits and what they care about
+- `visual_style` — personality in the user's own words (e.g. "bold and energetic", "warm and handcrafted")
+- `color_preference` — any colour direction (completely free-form, e.g. "deep forest greens with gold")
+- `design_inspiration` — sites/brands they admire or want to differ from
+- `pages_needed` — free-text page list or "let AI decide"
+- `features` — free-text feature requests
+- `user_content` — existing copy, bios, mission statements to incorporate
+
+**Generation stages:**
+1. **Structure** — AI freely designs site name, tagline, colour palette, page list, nav, footer
+2. **Content** — AI generates per-page blocks, choosing block types and order based on each page's purpose
+3. **Assembly** — plan stored in `build_queue` for human review
+
+**Adding to or modifying the generation prompts:**
+- System prompt: `AI::getSystemPrompt()` — shows available block types, core design philosophy
+- Structure prompt: `AIController::buildStructurePrompt()` — asks AI to design architecture freely from the brief
+- Page prompt: `AIController::buildPagePrompt()` — asks AI to choose blocks freely for each page
+- SSE equivalents in `AIOrchestrator::stream()` for streaming generation
+
 ### Streaming
 
-Use `/api/ai/stream` for server-sent events (SSE) streaming responses. The `AIOrchestrator` class handles multi-call pipelines.
+Use `/api/ai/stream` for server-sent events (SSE) streaming responses. The `AIOrchestrator` class handles the same multi-stage pipeline with live progress updates.
+
+### Conversational Wizard
+
+`AIConversation` / `AIChatController` provide an open-ended chat interface at `/admin/ai/chat`. The AI acts as a creative design partner, exploring vision through natural conversation before producing a brief that feeds into the same generation pipeline.
 
 ---
 
