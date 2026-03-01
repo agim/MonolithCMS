@@ -172,17 +172,27 @@ We will leverage advanced models like GPT-4 for high-quality content generation 
 - **Iterative Improvement:** The AI can refine content based on user feedback.
 
 ## 18. User Input for Personalization
-An onboarding questionnaire will collect user needs to guide the AI:
-- **Industry/Domain:** Café, Law Firm, etc.
-- **Tone/Style:** Professional, Friendly, Humorous.
-- **Key Features:** Contact forms, galleries, FAQs.
-- **Technical Preferences:** Choice of JS frameworks or libraries (defaults to simple vanilla JS).
+The AI generation form collects an open-ended creative brief — no dropdowns, no preset palettes, no forced categories. The AI interprets the brief freely and makes every design decision itself.
+
+**Brief fields collected at `/admin/ai`:**
+- **Business Name** *(required)* — project or business name.
+- **Description** *(required)* — rich free-text: what the project is, who it's for, what makes it special.
+- **Target Audience** — who visits and what they care about (e.g., "First-time homeowners aged 30–50 who value sustainability").
+- **Visual Style** — personality in the user's own words (e.g., "Bold and energetic", "Warm and handcrafted", "Clean and minimal").
+- **Color Direction** — completely free-form (e.g., "Deep forest greens with gold accents", "Whatever feels right for a law firm").
+- **Design Inspiration** — sites or brands to emulate or differ from (e.g., "Linear.app for clean aesthetics, but warmer").
+- **Pages Needed** — free-text page list or "let AI decide".
+- **Features** — free-text feature requests (e.g., "Contact form, photo gallery, pricing table").
+- **User Content** — existing copy, bios, mission statements, or slogans to incorporate.
+
+**Generation philosophy:**
+The AI decides everything — page count, page order, block types per page, colour palette, typography direction — based solely on the brief. There are no fixed industry templates, no preset colour palettes to choose from, and no forced section structures. The result is a unique site, not a filled-in template.
 
 ## 19. User-Provided Content Option
-The system allows users to provide their own content during the Q&A if they choose.
-- **Hybrid Approach:** User can author specific sections while letting AI handle others.
-- **Asset Management:** Users can upload their own logos and photos via the file manager.
-- **Flexibility:** Users keep control over their brand's voice while benefiting from AI speed.
+Users can supply their own content within the brief and have it woven into the generated site.
+- **Existing copy:** Paste bios, mission statements, product descriptions, or taglines into the "User Content" field.
+- **Asset Management:** Users upload logos and photos via the integrated file manager at `/admin/media`.
+- **Flexibility:** Users control their brand's voice and core facts; the AI handles structure, supporting copy, and visual design.
 
 ## 20. Maximum Security
 Security is a core design principle, following industry best practices:
@@ -258,7 +268,7 @@ The system aims for the "copy-and-go" experience:
 ## 5. Automated Setup Wizard Flow
 1. **Uninitialized Detection:** If no admin exists, redirect to local setup.
 2. **Admin Creation:** Establish the primary account.
-3. **AI Discovery Interview:** Questionnaire regarding industry, tone, and features.
+3. **Creative Brief:** Open-ended form collecting business name, description, target audience, visual style, colour direction, design inspiration, pages, features, and any existing content.
 4. **Plan Generation:** AI returns a structured JSON plan (routes, menus, colors).
 5. **Human Approval:** Admin reviews the plan before the system populates tables and builds the initial cache.
 
