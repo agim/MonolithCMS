@@ -1,7 +1,7 @@
 <?php
 /*==============================================================================
  * MonolithCMS - Single-File AI-Driven Website Builder
- * Version: 1.1.4
+ * Version: 1.1.5
  *
  * A portable, AI-powered CMS in a single PHP file with SQLite backend.
  * Upload index.php to any PHP host — site.sqlite is created automatically on first run.
@@ -39,7 +39,7 @@ if (PHP_SAPI === 'cli-server') {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Constants
-define('MONOLITHCMS_VERSION', '1.1.4');
+define('MONOLITHCMS_VERSION', '1.1.5');
 define('MONOLITHCMS_ROOT', __DIR__);
 define('MONOLITHCMS_DB', MONOLITHCMS_ROOT . '/site.sqlite');
 define('MONOLITHCMS_CACHE', MONOLITHCMS_ROOT . '/cache');
@@ -18261,6 +18261,8 @@ Router::post('/contact', 'FormController::contact');
 
 // ─── SITEMAP ─────────────────────────────────────────────────────────────────
 Router::get('/sitemap.xml', 'Sitemap::serve');
+Router::get('/robots.txt', 'RobotsController::serve');
+Router::get('/llms.txt', 'LLMsController::serve');
 
 // ─── PUBLIC ROUTES ───────────────────────────────────────────────────────────
 Router::get('/', function () use ($needsSetup) {
@@ -18941,6 +18943,114 @@ class Sitemap {
         $entry .= '<priority>' . $priority . '</priority>';
         $entry .= '</url>';
         return $entry;
+    }
+
+    private static function baseUrl(): string {
+        $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        return rtrim($scheme . '://' . $host, '/');
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+class RobotsController {
+    public static function serve(): void {
+        $baseUrl = self::baseUrl();
+        $body    = "User-agent: *\nDisallow:\n\n";
+        $body   .= "Sitemap: {$baseUrl}/sitemap.xml\n";
+        $body   .= "LLMs: {$baseUrl}/llms.txt\n";
+
+        header('Content-Type: text/plain; charset=UTF-8');
+        header('Cache-Control: public, max-age=86400');
+        echo $body;
+    }
+
+    private static function baseUrl(): string {
+        $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        return rtrim($scheme . '://' . $host, '/');
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+class LLMsController {
+    public static function serve(): void {
+        $baseUrl = self::baseUrl();
+        $lines   = [];
+
+        // ── Header ────────────────────────────────────────────────────────────
+        $siteName = htmlspecialchars_decode(Settings::get('site_name', 'My Site'), ENT_QUOTES);
+        $siteDesc = htmlspecialchars_decode(Settings::get('site_description', ''), ENT_QUOTES);
+
+        $lines[] = "# {$siteName}";
+        $lines[] = '';
+        if ($siteDesc !== '') {
+            $lines[] = "> {$siteDesc}";
+            $lines[] = '';
+        }
+
+        // ── Core pages ────────────────────────────────────────────────────────
+        $homePage = DB::fetch("SELECT title, meta_description FROM pages WHERE slug = 'home' AND status = 'published'");
+        $pages    = DB::fetchAll(
+            "SELECT title, slug, meta_description FROM pages WHERE status = 'published' AND slug != 'home' ORDER BY title ASC"
+        );
+
+        if ($homePage || !empty($pages)) {
+            $lines[] = '## Core pages';
+            $lines[] = '';
+            if ($homePage) {
+                $title = htmlspecialchars_decode($homePage['title'], ENT_QUOTES);
+                $desc  = htmlspecialchars_decode($homePage['meta_description'] ?? '', ENT_QUOTES);
+                $entry = "- [{$title}]({$baseUrl}/)";
+                if ($desc !== '') {
+                    $entry .= ": {$desc}";
+                }
+                $lines[] = $entry;
+            }
+            foreach ($pages as $page) {
+                $title = htmlspecialchars_decode($page['title'], ENT_QUOTES);
+                $slug  = rawurlencode($page['slug']);
+                $desc  = htmlspecialchars_decode($page['meta_description'] ?? '', ENT_QUOTES);
+                $entry = "- [{$title}]({$baseUrl}/{$slug})";
+                if ($desc !== '') {
+                    $entry .= ": {$desc}";
+                }
+                $lines[] = $entry;
+            }
+            $lines[] = '';
+        }
+
+        // ── Blog ──────────────────────────────────────────────────────────────
+        $blogEnabled = (bool)(int)Settings::get('blog_enabled', '0');
+        if ($blogEnabled) {
+            $posts = DB::fetchAll(
+                "SELECT title, slug, excerpt FROM blog_posts WHERE status = 'published' ORDER BY published_at DESC LIMIT 50"
+            );
+            if (!empty($posts)) {
+                $blogTitle = htmlspecialchars_decode(Settings::get('blog_title', 'Blog'), ENT_QUOTES);
+                $lines[] = "## {$blogTitle}";
+                $lines[] = '';
+                foreach ($posts as $post) {
+                    $title   = htmlspecialchars_decode($post['title'], ENT_QUOTES);
+                    $slug    = rawurlencode($post['slug']);
+                    $excerpt = htmlspecialchars_decode($post['excerpt'] ?? '', ENT_QUOTES);
+                    $entry   = "- [{$title}]({$baseUrl}/blog/{$slug})";
+                    if ($excerpt !== '') {
+                        $entry .= ": {$excerpt}";
+                    }
+                    $lines[] = $entry;
+                }
+                $lines[] = '';
+            }
+        }
+
+        $output = implode("\n", $lines);
+
+        header('Content-Type: text/plain; charset=UTF-8');
+        header('Cache-Control: public, max-age=3600');
+        echo $output;
     }
 
     private static function baseUrl(): string {
