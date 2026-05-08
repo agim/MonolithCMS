@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract tag annotation
+        id: notes
+        run: |
+          # Pull the full annotated tag message (body only, strip the subject line)
+          BODY=$(git tag -l --format='%(contents:body)' "${{ github.ref_name }}")
+          # If the tag has no body, fall back to the subject line
+          if [ -z "$BODY" ]; then
+            BODY=$(git tag -l --format='%(contents:subject)' "${{ github.ref_name }}")
+          fi
+          # Write to a temp file to preserve newlines
+          printf '%s' "$BODY" > /tmp/release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: MonolithCMS ${{ github.ref_name }}
+          body_path: /tmp/release_notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
