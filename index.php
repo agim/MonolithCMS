@@ -1,7 +1,7 @@
 <?php
 /*==============================================================================
  * MonolithCMS - Single-File AI-Driven Website Builder
- * Version: 1.1.5
+ * Version: 1.1.6
  *
  * A portable, AI-powered CMS in a single PHP file with SQLite backend.
  * Upload index.php to any PHP host — site.sqlite is created automatically on first run.
@@ -39,7 +39,7 @@ if (PHP_SAPI === 'cli-server') {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Constants
-define('MONOLITHCMS_VERSION', '1.1.5');
+define('MONOLITHCMS_VERSION', '1.1.6');
 define('MONOLITHCMS_ROOT', __DIR__);
 define('MONOLITHCMS_DB', MONOLITHCMS_ROOT . '/site.sqlite');
 define('MONOLITHCMS_CACHE', MONOLITHCMS_ROOT . '/cache');
@@ -161,8 +161,9 @@ if ($cachedVersion !== MONOLITHCMS_VERSION) {
     }
     // Clear generated CSS asset files (theme CSS, regenerated on next request)
     array_map('unlink', glob(MONOLITHCMS_CACHE . '/assets/*.css') ?: []);
-    // Invalidate cached sitemap so it is rebuilt with fresh URLs on next request
+    // Invalidate cached sitemap and llms.txt so they are rebuilt on next request
     @unlink(MONOLITHCMS_CACHE . '/sitemap.xml');
+    @unlink(MONOLITHCMS_CACHE . '/llms.txt');
     // Update version marker
     @file_put_contents($versionFile, MONOLITHCMS_VERSION);
 }
@@ -18976,7 +18977,30 @@ class RobotsController {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class LLMsController {
+    private static string $cacheFile = '';
+
+    private static function cacheFile(): string {
+        if (self::$cacheFile === '') {
+            self::$cacheFile = MONOLITHCMS_CACHE . '/llms.txt';
+        }
+        return self::$cacheFile;
+    }
+
+    // ── Public entry-point ────────────────────────────────────────────────────
     public static function serve(): void {
+        $file = self::cacheFile();
+
+        if (!file_exists($file)) {
+            self::regenerate();
+        }
+
+        header('Content-Type: text/plain; charset=UTF-8');
+        header('Cache-Control: public, max-age=3600');
+        readfile($file);
+    }
+
+    // ── Build and cache llms.txt ──────────────────────────────────────────────
+    public static function regenerate(): void {
         $baseUrl = self::baseUrl();
         $lines   = [];
 
@@ -19046,11 +19070,7 @@ class LLMsController {
             }
         }
 
-        $output = implode("\n", $lines);
-
-        header('Content-Type: text/plain; charset=UTF-8');
-        header('Cache-Control: public, max-age=3600');
-        echo $output;
+        @file_put_contents(self::cacheFile(), implode("\n", $lines));
     }
 
     private static function baseUrl(): string {
