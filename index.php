@@ -44,6 +44,24 @@ define('MONOLITHCMS_ROOT', __DIR__);
 define('MONOLITHCMS_DB', MONOLITHCMS_ROOT . '/site.sqlite');
 define('MONOLITHCMS_CACHE', MONOLITHCMS_ROOT . '/cache');
 
+// Managed-mode: load .managed_config if present
+function loadManagedConfig(): array {
+    $configFile = __DIR__ . '/.managed_config';
+    if (!file_exists($configFile)) return [];
+    $config = [];
+    foreach (file($configFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+        if (str_starts_with(trim($line), '#')) continue;
+        if (str_contains($line, '=')) {
+            [$key, $val] = explode('=', $line, 2);
+            $config[trim($key)] = trim($val);
+        }
+    }
+    return $config;
+}
+
+define('MANAGED_CONFIG', loadManagedConfig());
+define('IS_MANAGED', (MANAGED_CONFIG['MONOLITHCMS_MANAGED'] ?? 'false') === 'true');
+
 // Environment Detection
 $isProduction = !in_array($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1', ['127.0.0.1', '::1']);
 $isDev        = !$isProduction;
@@ -108,6 +126,7 @@ header("Content-Security-Policy: " .
     "frame-src 'self' https://www.youtube.com https://youtu.be https://www.youtube-nocookie.com https://player.vimeo.com https://www.google.com; " .
     "worker-src blob: 'self'; " .
     "connect-src 'self' https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com " .
+        (IS_MANAGED ? (MANAGED_CONFIG['MONOLITHCMS_APP_URL'] ?? 'https://app.monolithcms.com') . ' ' : '') .
         "https://www.google-analytics.com https://analytics.google.com https://stats.g.doubleclick.net https://www.googletagmanager.com"
 );
 
@@ -3226,6 +3245,7 @@ HTML,
         <span class="material-symbols-outlined text-[#135bec]">auto_awesome</span>
         AI Provider
         </h2>
+        <?php if (!IS_MANAGED): ?>
         {{#if ai_has_key}}
         <div class="flex items-center gap-3 mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
         <span class="material-symbols-outlined text-green-600 text-lg">check_circle</span>
@@ -3254,6 +3274,15 @@ HTML,
                    class="cms-input">
         </div>
         </div>
+        <?php else: ?>
+        <div class="flex items-center gap-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <span class="material-symbols-outlined text-blue-600 text-lg">cloud</span>
+            <div>
+                <p class="text-sm text-blue-800 font-medium">AI is managed by MonolithCMS Platform.</p>
+                <p class="text-sm text-blue-700 mt-1">Model: <strong><?= htmlspecialchars(MANAGED_CONFIG['MONOLITHCMS_AI_MODEL'] ?? 'claude-sonnet-4-6') ?></strong></p>
+            </div>
+        </div>
+        <?php endif; ?>
     </div>
 
     <!-- Email -->
@@ -5943,6 +5972,21 @@ class Asset {
             $content = self::stripMetadata($content, $mimeType);
         }
 
+        // Managed-hosting storage cap: reject if this insert would push
+        // site.sqlite over the plan's storage_limit_bytes. Only enforced when
+        // IS_MANAGED — self-hosters are not subject to any limit.
+        if (IS_MANAGED) {
+            $limit = (int) (MANAGED_CONFIG['MONOLITHCMS_STORAGE_LIMIT_BYTES'] ?? 0);
+            if ($limit > 0) {
+                $current = @filesize(MONOLITHCMS_DB) ?: 0;
+                if ($current + strlen($content) > $limit) {
+                    throw new Exception(
+                        'Storage limit reached. Free up space or upgrade your plan to upload more.'
+                    );
+                }
+            }
+        }
+
         // Store in database
         DB::execute(
             "INSERT INTO assets (filename, mime_type, blob_data, hash, file_size, created_at)
@@ -6109,6 +6153,11 @@ class SetupController {
             Response::redirect('/setup?step=2');
         }
 
+        // In managed mode, AI is pre-configured — skip step 3 automatically
+        if (IS_MANAGED && $step === 3) {
+            Response::redirect('/setup?step=4');
+        }
+
         $stepClasses = [
             'step1_class' => $step === 1 ? 'active' : ($step > 1 ? 'done' : 'pending'),
             'step2_class' => $step === 2 ? 'active' : ($step > 2 ? 'done' : 'pending'),
@@ -6199,6 +6248,11 @@ class SetupController {
 
     private static function processStep3(): void {
         CSRF::require();
+
+        // In managed mode, AI is pre-configured — skip straight to step 4
+        if (IS_MANAGED) {
+            Response::redirect('/setup?step=4');
+        }
 
         $provider = trim(Request::input('ai_provider', ''));
         $apiKey   = trim(Request::input('ai_api_key', ''));
@@ -14834,6 +14888,14 @@ class AI {
 
     // Get the configured AI provider settings
     private static function getProvider(): array {
+        if (IS_MANAGED) {
+            return [
+                'provider' => 'managed',
+                'api_key'  => MANAGED_CONFIG['MONOLITHCMS_SITE_TOKEN'] ?? '',
+                'model'    => MANAGED_CONFIG['MONOLITHCMS_AI_MODEL'] ?? 'claude-sonnet-4-6',
+                'app_url'  => MANAGED_CONFIG['MONOLITHCMS_APP_URL'] ?? 'https://app.monolithcms.com',
+            ];
+        }
         return [
             'provider' => Settings::get('ai_provider', 'openai'),
             'api_key' => Settings::get('ai_api_key', ''),
@@ -14843,6 +14905,7 @@ class AI {
 
     // Check if AI is configured
     public static function isConfigured(): bool {
+        if (IS_MANAGED) return true;
         $config = self::getProvider();
         return !empty($config['api_key']);
     }
@@ -14850,9 +14913,10 @@ class AI {
     // Multi-turn chat: accepts an array of {role, content} messages and returns plain text. Used by AIConversation for the interactive design wizard.
     public static function generateChat(array $messages, string $systemPrompt = '', int $maxTokens = 1024): string {
         $config = self::getProvider();
-        if (empty($config['api_key'])) return 'AI is not configured yet.';
+        if (!IS_MANAGED && empty($config['api_key'])) return 'AI is not configured yet.';
 
         $text = match($config['provider']) {
+            'managed'   => self::managedChatRequest($messages, $systemPrompt, $config, $maxTokens),
             'anthropic' => self::anthropicChatRequest($messages, $systemPrompt, $config, $maxTokens),
             'google'    => self::googleChatRequest($messages, $systemPrompt, $config, $maxTokens),
             default     => self::openaiChatRequest($messages, $systemPrompt, $config, $maxTokens),
@@ -15022,17 +15086,74 @@ class AI {
         return $data['candidates'][0]['content']['parts'][0]['text'] ?? null;
     }
 
+    // Send a multi-turn chat request through the MonolithCMS Platform managed proxy
+    private static function managedChatRequest(array $messages, string $system, array $config, int $maxTokens = 1024): ?string {
+        $payload = [
+            'messages'     => $messages,
+            'system_prompt' => $system,
+            'max_tokens'   => $maxTokens,
+        ];
+        $r = self::httpPost(
+            rtrim($config['app_url'], '/') . '/api/v1/ai/complete',
+            [
+                'Content-Type' => 'application/json',
+                'X-Site-Token' => $config['api_key'],
+            ],
+            $payload,
+            120
+        );
+        if ($r['code'] === 402) {
+            error_log('AI::managedChatRequest — token budget exceeded');
+            return 'AI generation limit reached. Please upgrade your plan for more AI tokens.';
+        }
+        if ($r['code'] !== 200) {
+            error_log('AI::managedChatRequest — HTTP error: ' . $r['code']);
+            return null;
+        }
+        $data = json_decode($r['body'] ?? '{}', true);
+        return $data['content'] ?? null;
+    }
+
+    // Send a single-prompt generate request through the MonolithCMS Platform managed proxy
+    private static function managedRequest(string $prompt, array $config): ?string {
+        $payload = [
+            'messages'     => [['role' => 'user', 'content' => $prompt]],
+            'system_prompt' => self::getSystemPrompt(),
+            'max_tokens'   => 32000,
+        ];
+        $r = self::httpPostWithRetry(
+            rtrim($config['app_url'], '/') . '/api/v1/ai/complete',
+            [
+                'Content-Type' => 'application/json',
+                'X-Site-Token' => $config['api_key'],
+            ],
+            $payload,
+            240
+        );
+        if ($r['code'] === 402) {
+            error_log('AI::managedRequest — token budget exceeded');
+            return null;
+        }
+        if ($r['code'] !== 200) {
+            error_log('AI::managedRequest — HTTP error: ' . $r['code']);
+            return null;
+        }
+        $data = json_decode($r['body'] ?? '{}', true);
+        return $data['content'] ?? null;
+    }
+
     // Generate content using the configured AI provider
     public static function generate(string $prompt, array $ctx = []): ?array {
         $config = self::getProvider();
 
-        if (empty($config['api_key'])) {
+        if (!IS_MANAGED && empty($config['api_key'])) {
             error_log('AI::generate — no API key configured');
             return null;
         }
 
         $start    = microtime(true);
         $response = match($config['provider']) {
+            'managed'   => self::managedRequest($prompt, $config),
             'anthropic' => self::anthropicRequest($prompt, $config),
             'google'    => self::googleRequest($prompt, $config),
             default     => self::openaiRequest($prompt, $config),
